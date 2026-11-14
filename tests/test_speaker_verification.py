@@ -55,12 +55,13 @@ def test_silence_never_counts_as_sufficient_speech():
 def test_incoming_webhook_rejects_unsigned_and_signs_valid_caller(monkeypatch):
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "secret")
     client = TestClient(app)
-    form = {"From": "+1234567890"}
+    form = {"From": "+1234567890", "FromCountry": "US"}
     assert client.post("/voice/incoming", data=form).status_code == 403
     signature = RequestValidator("secret").compute_signature("http://testserver/voice/incoming", form)
     response = client.post("/voice/incoming", data=form, headers={"X-Twilio-Signature": signature})
     assert response.status_code == 200
     assert 'name="caller_token"' in response.text
+    assert 'name="sabi_country"' in response.text
 
 
 def test_harness_uses_tool_result_not_model_text(monkeypatch):
@@ -120,7 +121,7 @@ def test_twilio_verification_uses_signed_number_and_fails_closed(monkeypatch, to
     monkeypatch.setattr("app.voice.twilio_stream.PostgresVoiceStore", Store)
     monkeypatch.setattr("app.voice.twilio_stream.create_harness", Agent)
     events = iter([
-        {"event": "start", "start": {"streamSid": "s", "customParameters": {"caller_token": sign_caller("+1234567890", "secret")}}},
+        {"event": "start", "start": {"streamSid": "s", "customParameters": {"caller_token": sign_caller("+1234567890", "secret"), "sabi_country": "US"}}},
         {"event": "media", "media": {"payload": base64.b64encode(b"audio").decode()}},
     ])
     bridge = TwilioMediaBridge(WebSocket(), "prompt")
@@ -128,3 +129,4 @@ def test_twilio_verification_uses_signed_number_and_fails_closed(monkeypatch, to
     with pytest.raises(RuntimeError, match=error):
         asyncio.run(bridge.verify_call())
     assert received == {"caller_id": "+1234567890", "audio": b"sample"}
+    assert bridge.location.country == "US"
