@@ -25,6 +25,12 @@ LIVE_URL = (
 DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 
 
+def _qualified_model(model: str) -> str:
+    """Live expects a fully qualified name; accept it with or without the prefix."""
+    model = model.strip()
+    return model if model.startswith("models/") else f"models/{model}"
+
+
 class LiveSetupError(RuntimeError):
     """Raised when the Live session cannot be opened or acknowledged."""
 
@@ -60,7 +66,7 @@ def build_setup_message(cfg: LiveConfig) -> dict[str, Any]:
         }
 
     setup: dict[str, Any] = {
-        "model": f"models/{cfg.model}",
+        "model": _qualified_model(cfg.model),
         "generationConfig": generation,
         "systemInstruction": {"parts": [{"text": cfg.system_prompt}]},
         "inputAudioTranscription": {},
