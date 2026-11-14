@@ -14,11 +14,13 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
 
@@ -27,6 +29,14 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("sabi.main")
+
+# Must run before the module-level os.getenv calls below, or .env is ignored.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # the real environment is authoritative in containers
+    pass
 
 # Load system prompt
 PROMPT_PATH = Path(__file__).parent / "prompts" / "sabi_safe_prompt.md"
@@ -107,19 +117,55 @@ async def root():
     }
 
 
-@app.post("/voice/incoming")
+async def _twilio_params(request: Request) -> dict[str, str]:
+    """Collect Twilio's request parameters regardless of configured HTTP method.
+
+    Twilio sends them as a urlencoded body for POST webhooks and as query string
+    parameters for GET webhooks; query values are merged in first so an explicit
+    body value wins.
+    """
+    params: dict[str, str] = dict(request.query_params)
+    if request.method == "POST":
+        try:
+            params.update({k: str(v) for k, v in (await request.form()).items()})
+        except Exception:  # malformed body must not drop the call
+            logger.warning("Could not parse Twilio webhook form body", exc_info=True)
+    return params
+
+
+@app.api_route("/voice/incoming", methods=["GET", "POST"])
 async def voice_incoming(request: Request):
     """Twilio Inbound Voice Webhook.
 
-    Returns TwiML that connects the inbound phone call to our WebSocket Media Stream.
+    Returns TwiML that connects the inbound phone call to our WebSocket Media
+    Stream, carrying the caller's location across as `<Parameter>` elements.
+    The media socket is a separate connection and never receives Twilio's geo
+    parameters on its own.
     """
     host = request.headers.get("host", "localhost:8000")
     protocol = "wss" if "https" in str(request.base_url) else "ws"
 
+    params = await _twilio_params(request)
+    location = from_twilio_webhook(params)
+    logger.info(
+        "Inbound call from %s | location=%s country=%s source=%s call_sid=%s",
+        location.number or "unknown",
+        location.describe(),
+        location.country or "-",
+        location.source,
+        params.get("CallSid", "-"),
+    )
+
+    stream_params = "".join(
+        f'\n            <Parameter name={quoteattr(name)} value={quoteattr(value)} />'
+        for name, value in sorted(location.to_custom_parameters().items())
+    )
+
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{protocol}://{host}/ws/twilio" />
+        <Stream url="{protocol}://{host}/ws/twilio">{stream_params}
+        </Stream>
     </Connect>
 </Response>"""
 

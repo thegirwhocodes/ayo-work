@@ -2,10 +2,14 @@
 
 Handles full-duplex streaming audio between a Twilio phone call and Gemini Live.
 - Twilio sends: 8kHz mu-law audio frames (base64 encoded)
-- Server decodes: mu-law -> 8kHz PCM16 -> Gemini Live (16kHz or 8kHz PCM)
+- Server decodes: mu-law -> 8kHz PCM16 -> Gemini Live
 - Gemini Live yields: 24kHz PCM16 audio
 - Server downsamples: 24kHz -> 8kHz PCM16 -> mu-law -> base64 -> Twilio
 - Interruption handling: sends {"event": "clear"} to flush Twilio playback buffer.
+
+The Gemini session is opened on the `start` event rather than up front, because
+`start.customParameters` carries the caller's location and that has to be baked
+into the system prompt before the model speaks its first word.
 """
 
 from __future__ import annotations
@@ -24,7 +28,11 @@ from app.voice.audio import (
     Downsample24kTo8k,
     FrameChunker,
 )
-from app.voice.gemini_live import GeminiLiveSession
+from app.voice.caller_location import (
+    CallerLocation,
+    build_location_briefing,
+)
+from app.voice.gemini_live import GeminiLiveSession, LiveConfig
 
 logger = logging.getLogger("sabi.voice.twilio")
 
@@ -46,37 +54,60 @@ class TwilioMediaBridge:
 
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
+        self.location: CallerLocation = CallerLocation()
         self.gemini_session: Optional[GeminiLiveSession] = None
         self.resampler = Downsample24kTo8k()
         self.chunker = FrameChunker(frame_bytes=160)  # 20ms of 8kHz mu-law = 160 bytes
+        # Gemini's audio callback is synchronous, so it hands frames to this
+        # queue and a writer task does the awaiting.
+        self._outbound: asyncio.Queue[bytes] = asyncio.Queue()
         self._running = False
+
+    def handle_start(self, start_data: dict) -> CallerLocation:
+        """Record stream identifiers and caller location from the `start` event."""
+        self.stream_sid = start_data.get("streamSid")
+        self.call_sid = start_data.get("callSid")
+        self.location = CallerLocation.from_custom_parameters(
+            start_data.get("customParameters")
+        )
+        logger.info(
+            "Twilio stream started: stream_sid=%s call_sid=%s location=%s source=%s",
+            self.stream_sid,
+            self.call_sid,
+            self.location.describe(),
+            self.location.source,
+        )
+        return self.location
+
+    def build_system_prompt(self) -> str:
+        """Base trauma-informed prompt plus this caller's location briefing."""
+        return self.system_prompt + build_location_briefing(self.location)
+
+    async def _connect_gemini(self) -> bool:
+        cfg = LiveConfig(
+            system_prompt=self.build_system_prompt(),
+            voice=self.voice_name,
+            input_rate=8000,
+        )
+        self.gemini_session = GeminiLiveSession(
+            cfg,
+            on_audio=self._on_gemini_audio,
+            on_interrupted=self._on_interrupted,
+            on_turn_complete=self._on_turn_complete,
+        )
+        try:
+            await self.gemini_session.connect()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to Gemini Live: {e}")
+            self.gemini_session = None
+            return False
 
     async def run(self):
         self._running = True
         logger.info("Starting Twilio Media Bridge...")
 
-        # Create Gemini Live session
-        self.gemini_session = GeminiLiveSession(
-            system_instruction=self.system_prompt,
-            voice_name=self.voice_name,
-            input_sample_rate=8000,
-            output_sample_rate=24000,
-            on_audio_out=self._on_gemini_audio,
-            on_user_transcript=self._on_user_transcript,
-            on_model_transcript=self._on_model_transcript,
-            on_interrupted=self._on_interrupted,
-        )
-
-        # Connect to Gemini Live
-        try:
-            await self.gemini_session.connect()
-        except Exception as e:
-            logger.error(f"Failed to connect to Gemini Live: {e}")
-            await self.ws.close()
-            return
-
-        gemini_loop_task = asyncio.create_task(self.gemini_session.receive_loop())
-
+        tasks: list[asyncio.Task] = []
         try:
             while self._running:
                 raw_text = await self.ws.receive_text()
@@ -87,10 +118,11 @@ class TwilioMediaBridge:
                     logger.info("Twilio connected event received")
 
                 elif event == "start":
-                    start_data = data.get("start", {})
-                    self.stream_sid = start_data.get("streamSid")
-                    self.call_sid = start_data.get("callSid")
-                    logger.info(f"Twilio stream started: stream_sid={self.stream_sid} call_sid={self.call_sid}")
+                    self.handle_start(data.get("start", {}))
+                    if not await self._connect_gemini():
+                        break
+                    tasks.append(asyncio.create_task(self.gemini_session.receive_forever()))
+                    tasks.append(asyncio.create_task(self._drain_outbound()))
 
                 elif event == "media":
                     media_payload = data.get("media", {}).get("payload")
@@ -117,52 +149,60 @@ class TwilioMediaBridge:
             self._running = False
             if self.gemini_session:
                 await self.gemini_session.close()
-            gemini_loop_task.cancel()
+            for task in tasks:
+                task.cancel()
             logger.info("Twilio Media Bridge closed.")
 
-    async def _on_gemini_audio(self, pcm24k_chunk: bytes):
-        """Called when Gemini Live emits 24kHz PCM16 audio."""
-        if not self.stream_sid:
-            return
+    def _on_gemini_audio(self, pcm24k_chunk: bytes) -> None:
+        """Called synchronously when Gemini Live emits 24kHz PCM16 audio."""
+        self._outbound.put_nowait(pcm24k_chunk)
 
-        # 1. Downsample 24kHz PCM16 -> 8kHz PCM16
-        pcm8k = self.resampler.resample(pcm24k_chunk)
-        if not pcm8k:
-            return
+    async def _drain_outbound(self) -> None:
+        """Resample, encode and pace Gemini audio out to Twilio."""
+        while True:
+            pcm24k_chunk = await self._outbound.get()
+            if not self.stream_sid:
+                continue
 
-        # 2. Encode to 8kHz G.711 mu-law
-        mulaw = pcm16_to_mulaw(pcm8k)
+            # 1. Downsample 24kHz PCM16 -> 8kHz PCM16
+            pcm8k = self.resampler.resample(pcm24k_chunk)
+            if not pcm8k:
+                continue
 
-        # 3. Chunk into 20ms (160 bytes) frames for smooth telephony pacing
-        frames = self.chunker.add_samples(mulaw)
-        for frame in frames:
-            b64_audio = base64.b64encode(frame).decode("utf-8")
-            media_message = {
-                "event": "media",
-                "streamSid": self.stream_sid,
-                "media": {
-                    "payload": b64_audio,
-                },
-            }
-            await self.ws.send_text(json.dumps(media_message))
+            # 2. Encode to 8kHz G.711 mu-law
+            mulaw = pcm16_to_mulaw(pcm8k)
+
+            # 3. Chunk into 20ms (160 bytes) frames for smooth telephony pacing
+            for frame in self.chunker.add_samples(mulaw):
+                await self.ws.send_text(
+                    json.dumps(
+                        {
+                            "event": "media",
+                            "streamSid": self.stream_sid,
+                            "media": {"payload": base64.b64encode(frame).decode("utf-8")},
+                        }
+                    )
+                )
 
     async def _on_interrupted(self):
         """Twilio user barged in: clear downstream playback buffer immediately."""
         if not self.stream_sid:
             return
         logger.info("Barge-in: clearing Twilio audio buffer")
-        clear_message = {
-            "event": "clear",
-            "streamSid": self.stream_sid,
-        }
-        await self.ws.send_text(json.dumps(clear_message))
+        # Drop audio already queued locally, or we would keep feeding Twilio
+        # frames from the turn the caller just interrupted.
+        while not self._outbound.empty():
+            self._outbound.get_nowait()
+        await self.ws.send_text(
+            json.dumps({"event": "clear", "streamSid": self.stream_sid})
+        )
 
-    async def _on_user_transcript(self, text: str):
-        logger.info(f"[CALLER]: {text}")
-        if self.on_transcript:
-            await self.on_transcript("caller", text)
-
-    async def _on_model_transcript(self, text: str):
-        logger.info(f"[SABI]: {text}")
-        if self.on_transcript:
-            await self.on_transcript("assistant", text)
+    async def _on_turn_complete(self, caller_text: str, model_text: str):
+        if caller_text:
+            logger.info(f"[CALLER]: {caller_text}")
+            if self.on_transcript:
+                await self.on_transcript("caller", caller_text)
+        if model_text:
+            logger.info(f"[SABI]: {model_text}")
+            if self.on_transcript:
+                await self.on_transcript("assistant", model_text)
