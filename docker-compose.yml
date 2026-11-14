@@ -3,6 +3,7 @@ services:
     build: .
     container_name: sabi-safe
     restart: unless-stopped
+    networks: [default, agent-backend]
     ports:
       - "8000:8000"
       - "9020:9020"
@@ -17,18 +18,80 @@ services:
       - AUDIOSOCKET_PORT=9020
       - ENABLE_AUDIOSOCKET=true
       - DATABASE_URL=${DATABASE_URL:-postgresql://sabi:sabi_dev_password@postgres:5432/sabi_safe}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+      - SUPPORT_GUIDANCE_ENABLED=${SUPPORT_GUIDANCE_ENABLED:-false}
+      - SUPPORT_MEMORY_ENABLED=${SUPPORT_MEMORY_ENABLED:-false}
+      - SUPPORT_MEMORY_ENCRYPTION_KEY=${SUPPORT_MEMORY_ENCRYPTION_KEY:-}
+      - SUPPORT_MEMORY_IDENTITY_KEY=${SUPPORT_MEMORY_IDENTITY_KEY:-}
+      - SUPPORT_MEMORY_RETENTION_DAYS=${SUPPORT_MEMORY_RETENTION_DAYS:-30}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
       - VOICE_VERIFICATION_THRESHOLD=${VOICE_VERIFICATION_THRESHOLD:-0.75}
+      - AGENT_SERVER_URL=http://agent-server:8000
+      - EMERGENCY_JOB_ENCRYPTION_KEY=${EMERGENCY_JOB_ENCRYPTION_KEY:-}
+      - EMERGENCY_WORKER_SECRET=${EMERGENCY_WORKER_SECRET:-}
+      - AGENT_SERVER_AUTH_SECRET=${AGENT_SERVER_AUTH_SECRET:-}
+      - LANGSMITH_TRACING=false
+    depends_on:
+      emergency-migrate:
+        condition: service_completed_successfully
+      agent-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+        required: false
+  emergency-migrate:
+    build: .
+    command: ["python", "-m", "scripts.migrate_emergency"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://sabi:sabi_dev_password@postgres:5432/sabi_safe}
+      EMERGENCY_WORKER_SECRET: ${EMERGENCY_WORKER_SECRET:-}
+      AGENT_SERVER_AUTH_SECRET: ${AGENT_SERVER_AUTH_SECRET:-}
+      EMERGENCY_JOB_ENCRYPTION_KEY: ${EMERGENCY_JOB_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
         required: false
-    volumes:
-      - .:/app
+    restart: "no"
+
+  agent-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-server
+    restart: unless-stopped
+    networks: [agent-backend, agent-egress]
+    environment:
+      DATABASE_URI: ${AGENT_DATABASE_URI:-}
+      REDIS_URI: ${AGENT_REDIS_URI:-redis://agent-redis:6379/0}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGGRAPH_CLOUD_LICENSE_KEY: ${LANGGRAPH_CLOUD_LICENSE_KEY:-}
+      LANGSMITH_TRACING: "false"
+      EMERGENCY_CALLBACK_URL: http://sabi-safe:8000/internal/emergency-job
+      EMERGENCY_WORKER_SECRET: ${EMERGENCY_WORKER_SECRET:-}
+      AGENT_SERVER_AUTH_SECRET: ${AGENT_SERVER_AUTH_SECRET:-}
+    depends_on:
+      agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ok', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  agent-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [agent-backend]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   postgres:
     profiles: [dev]
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
+    networks: [default, agent-backend]
     environment:
       POSTGRES_USER: sabi
       POSTGRES_PASSWORD: sabi_dev_password
@@ -43,3 +106,8 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  agent-backend:
+    internal: true
+  agent-egress:

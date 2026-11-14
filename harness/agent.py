@@ -2,11 +2,13 @@
 import os
 from pathlib import Path
 
-from deepagents import create_deep_agent
+from deepagents import AsyncSubAgent, create_deep_agent
 from deepagents.backends.utils import create_file_data
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import InMemorySaver
 
-from harness.tools import EmergencyTools, VoiceVerificationTool
+from harness.tools import VoiceVerificationTool
+from settings import get_settings
 
 
 def load_skill_files():
@@ -30,22 +32,16 @@ def create_harness(voice_tool: VoiceVerificationTool):
         model=model,
         tools=[voice_tool.verify_speaker],
         skills=["/skills/"],
-        system_prompt="Call verify_speaker exactly once immediately. Report its result without guessing.",
-        subagents=[],
-    )
-
-
-def create_emergency_harness(emergency_tools: EmergencyTools):
-    """Create a separate harness for a single relayed emergency action."""
-    model = ChatGoogleGenerativeAI(
-        model=os.getenv("HARNESS_MODEL", "gemini-2.5-flash"),
-        api_key=os.getenv("GEMINI_API_KEY"),
-    )
-    return create_deep_agent(
-        model=model,
-        tools=[emergency_tools.send_text_message, emergency_tools.request_location,
-               emergency_tools.start_phone_call],
-        system_prompt=("Call the named tool once immediately. Use only that tool; "
-                       "report its result without adding claims about delivery or dispatch."),
-        subagents=[],
+        system_prompt=("Coordinate voice verification and emergency work. Only when verification is "
+                       "requested, call verify_speaker. For an emergency job, call start_async_task with subagent_type "
+                       "emergency and pass the job reference exactly as supplied. Do not wait or poll."),
+        subagents=[AsyncSubAgent(
+            name="emergency",
+            description="Run an authorized emergency action in the background.",
+            graph_id="emergency",
+            url=get_settings().agent_server_url,
+            headers={"Authorization": f"Bearer {get_settings().agent_server_auth_secret}"},
+            notify_parent=False,
+        )],
+        checkpointer=InMemorySaver(),
     )

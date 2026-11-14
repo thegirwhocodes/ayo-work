@@ -72,7 +72,7 @@ def test_harness_uses_tool_result_not_model_text(monkeypatch):
         def __init__(self, tool):
             self.tool = tool
 
-        async def ainvoke(self, messages):
+        async def ainvoke(self, messages, config=None):
             await self.tool()
             return {"messages": [{"content": "not_matched"}]}
 
@@ -112,7 +112,7 @@ def test_twilio_verification_uses_signed_number_and_fails_closed(monkeypatch, to
         def __init__(self, voice_tool):
             self.voice_tool = voice_tool
 
-        async def ainvoke(self, messages):
+        async def ainvoke(self, messages, config=None):
             received.update(caller_id=self.voice_tool.caller_id, audio=self.voice_tool.audio_data)
             if tool_called:
                 self.voice_tool.result = VoiceVerificationResult("not_matched", 0.1)

@@ -26,6 +26,11 @@ class Settings:
     photon_project_id: str
     photon_sender_id: str
     emergency_responder_number: str
+    agent_server_url: str
+    emergency_callback_url: str
+    emergency_worker_secret: str = field(repr=False)
+    agent_server_auth_secret: str = field(repr=False)
+    emergency_job_encryption_key: str = field(repr=False)
 
 
 @lru_cache(maxsize=1)
@@ -56,4 +61,9 @@ def get_settings() -> Settings:
         photon_project_id=value("PHOTON_PROJECT_ID"),
         photon_sender_id=value("PHOTON_SENDER_ID"),
         emergency_responder_number=value("EMERGENCY_RESPONDER_NUMBER"),
+        agent_server_url=value("AGENT_SERVER_URL", "http://127.0.0.1:2024"),
+        emergency_callback_url=value("EMERGENCY_CALLBACK_URL", "http://127.0.0.1:8000/internal/emergency-job"),
+        emergency_worker_secret=value("EMERGENCY_WORKER_SECRET"),
+        agent_server_auth_secret=value("AGENT_SERVER_AUTH_SECRET"),
+        emergency_job_encryption_key=value("EMERGENCY_JOB_ENCRYPTION_KEY"),
     )

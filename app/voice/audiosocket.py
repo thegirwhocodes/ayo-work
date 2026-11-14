@@ -83,12 +83,10 @@ class AudioSocketConnection:
         logger.info("AudioSocket barge-in detected")
 
     async def _on_user_transcript(self, text: str):
-        logger.info(f"[CALLER]: {text}")
         if self.on_transcript:
             await self.on_transcript("caller", text)
 
     async def _on_model_transcript(self, text: str):
-        logger.info(f"[SABI]: {text}")
         if self.on_transcript:
             await self.on_transcript("assistant", text)
 

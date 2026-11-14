@@ -1,0 +1,13 @@
+# LangChain's standalone Agent Server, pinned to the version tested locally.
+FROM langchain/langgraph-api:0.18.0-py3.11
+
+WORKDIR /app
+COPY settings.py /app/settings.py
+COPY harness/__init__.py /app/harness/__init__.py
+COPY harness/emergency_subagent.py /app/harness/emergency_subagent.py
+COPY harness/agent_auth.py /app/harness/agent_auth.py
+RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt python-dotenv httpx
+
+ENV PYTHONPATH=/app
+ENV LANGSERVE_GRAPHS='{"emergency":"/app/harness/emergency_subagent.py:graph"}'
+ENV LANGGRAPH_AUTH='{"path":"/app/harness/agent_auth.py:auth"}'

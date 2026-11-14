@@ -18,3 +18,8 @@ psycopg[binary]>=3.2,<4
 scipy
 twilio>=9,<10
 webrtcvad-wheels>=2.0.14
+cohere==5.21.1
+langchain-experimental==0.4.2
+langchain-text-splitters==1.1.3
+tiktoken==0.14.0
+cryptography==46.0.7

@@ -64,7 +64,7 @@ Effects: Shorter sentences, more space, less advice-giving, more presence.
 Explicitly constrain hollow phrases:
 
 ```
-Never use: "I understand how you feel", "That must be hard",
+Never use: "I understand how you feel", "That must be hard", 
 "I'm here for you", "Your feelings are valid"
 
 Instead: Name the specific emotion. Reference their specific situation.
