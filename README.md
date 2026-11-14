@@ -47,6 +47,9 @@ Set your `GEMINI_API_KEY`:
 ```ini
 GEMINI_API_KEY="your-gemini-api-key"
 GEMINI_VOICE="Puck"
+# Optional: which Live speech model to run. Point it at another Live
+# model, e.g. "models/gemini-3.8-live"; the models/ prefix is optional.
+GEMINI_LIVE_MODEL="gemini-3.1-flash-live-preview"
 ```
 
 ### 3. Run the Server
