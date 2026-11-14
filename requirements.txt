@@ -12,7 +12,7 @@ pytest>=8.0.0
 speechbrain>=1.0.0
 torch
 torchaudio
-deepagents>=0.7,<0.8
+deepagents>=0.7.38,<0.8
 langchain-google-genai>=4,<5
 psycopg[binary]>=3.2,<4
 scipy
