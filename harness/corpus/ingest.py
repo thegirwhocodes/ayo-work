@@ -7,6 +7,9 @@ from pathlib import Path
 
 MODEL = "embed-v4.0"
 DIMENSIONS = 1024
+# Anything that changes how text becomes vectors belongs here, so changing it
+# changes every source digest and triggers a re-embed.
+PIPELINE = f"{MODEL}|{DIMENSIONS}|semantic-percentile|tiktoken-cl100k-700-50|v1"
 
 
 def digest(value: str) -> str:
@@ -31,11 +34,8 @@ def split_sections(sections, embeddings):
     return result
 
 
-def draft_source_from_markdown(path, metadata):
-    """Turn a page-sectioned corpus Markdown file into an UNAPPROVED manifest entry.
-
-    A person must review it and set review_status/rights_verified before ingestion.
-    """
+def sections_from_markdown(path):
+    """Split a page-sectioned corpus Markdown file into attributed sections."""
     import re
     sections = []
     for block in re.split(r"^## ", Path(path).read_text(encoding="utf-8"), flags=re.M)[1:]:
@@ -46,7 +46,15 @@ def draft_source_from_markdown(path, metadata):
             continue  # the reference list and similar non-guidance sections
         first_line = body.splitlines()[0].strip("# ").strip()[:120]
         sections.append({"heading": first_line, "page": f"p. {match.group(1)} (PDF {match.group(2)})", "text": body})
-    return {**metadata, "review_status": "pending", "rights_verified": False, "sections": sections}
+    return sections
+
+
+def draft_source_from_markdown(path, metadata):
+    """Turn a corpus Markdown file into an UNAPPROVED manifest entry.
+
+    A person must review it and set review_status/rights_verified before ingestion.
+    """
+    return {**metadata, "review_status": "pending", "rights_verified": False, "sections": sections_from_markdown(path)}
 
 
 def ingest_source(connection, source, embeddings):
@@ -57,11 +65,14 @@ def ingest_source(connection, source, embeddings):
     if source.get("review_status") != "approved" or not source.get("rights_verified"):
         raise ValueError("source review and rights verification are required")
     canonical = json.dumps(source["sections"], sort_keys=True, ensure_ascii=False)
-    source_hash = digest(canonical)
+    source_hash = digest(PIPELINE + "\n" + canonical)
     with connection.cursor() as cur:
-        cur.execute("SELECT content_hash, review_status FROM corpus_sources WHERE url=%s AND version=%s", (source["url"], source["version"]))
+        cur.execute("""SELECT s.content_hash, s.review_status,
+            (SELECT count(*) FROM corpus_chunks c WHERE c.source_id = s.id AND c.review_status='approved')
+            FROM corpus_sources s WHERE s.url=%s AND s.version=%s""", (source["url"], source["version"]))
         existing = cur.fetchone()
-    if existing and existing[0] == source_hash and existing[1] == "approved":
+    # Unchanged content with its chunks intact: skip chunking and embedding entirely.
+    if existing and existing[0] == source_hash and existing[1] == "approved" and existing[2] > 0:
         return 0
     chunks = split_sections(source["sections"], embeddings)
     if not chunks:

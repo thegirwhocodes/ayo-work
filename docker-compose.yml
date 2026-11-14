@@ -34,6 +34,8 @@ services:
     depends_on:
       emergency-migrate:
         condition: service_completed_successfully
+      support-init:
+        condition: service_completed_successfully
       agent-server:
         condition: service_healthy
       postgres:
@@ -47,6 +49,20 @@ services:
       EMERGENCY_WORKER_SECRET: ${EMERGENCY_WORKER_SECRET:-}
       AGENT_SERVER_AUTH_SECRET: ${AGENT_SERVER_AUTH_SECRET:-}
       EMERGENCY_JOB_ENCRYPTION_KEY: ${EMERGENCY_JOB_ENCRYPTION_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
+  # Applies the support schema, then re-chunks/re-embeds corpus sources whose
+  # content digest changed. Unchanged sources are skipped.
+  support-init:
+    build: .
+    command: ["python", "-m", "scripts.sync_support"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://sabi:sabi_dev_password@postgres:5432/sabi_safe}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
