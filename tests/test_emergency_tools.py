@@ -6,7 +6,7 @@ import pytest
 
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.gemini_live import LiveConfig, build_setup_message
-from harness.agent import create_emergency_harness
+from harness.agent import create_harness
 from harness.tools import EmergencyCallContext, EmergencyTools, PhotonMessaging, request_location, send_text_message
 from settings import get_settings
 
@@ -82,16 +82,29 @@ def test_consent_and_relay_fail_closed(monkeypatch):
     assert bridge.emergency_context.responder_consent
 
     class Agent:
-        def __init__(self, tools):
-            self.tools = tools
+        async def ainvoke(self, payload, config=None):
+            from harness.emergency_jobs import execute_job
+            import re
+            token = re.search(r"emergency-job:([A-Za-z0-9_-]{43})", payload["messages"][0]["content"]).group(1)
+            await execute_job(token)
 
-        async def ainvoke(self, payload):
-            await getattr(self.tools, self.tools.action)()
-            return {"messages": [{"content": "Call placed"}]}
+    class Session:
+        def __init__(self):
+            self.messages = []
 
-    monkeypatch.setattr("app.voice.twilio_stream.create_emergency_harness", Agent)
-    result = run(bridge.relay_to_harness("relay_to_harness", {"action": "start_phone_call"}))
-    assert result == {"status": "not_implemented"}
+        async def send_text(self, text):
+            self.messages.append(text)
+
+    async def exercise():
+        bridge.harness_agent = Agent()
+        bridge.gemini_session = Session()
+        result = await bridge.relay_to_harness("relay_to_harness", {"action": "start_phone_call"})
+        assert result == {"status": "pending"}
+        await asyncio.gather(*bridge.emergency_tasks)
+        return bridge.gemini_session.messages
+
+    messages = run(exercise())
+    assert '"status": "not_implemented"' in messages[0]
     assert run(bridge.relay_to_harness("relay_to_harness", {"action": "invalid"}))["status"] == "unavailable"
 
 
@@ -101,15 +114,16 @@ def test_tool_is_restricted_to_requested_action():
     assert json.loads(run(tools.start_phone_call()))["status"] == "not_implemented"
 
 
-def test_gemini_is_exposed_only_to_relay_and_harness_has_three_tools(monkeypatch):
+def test_gemini_is_exposed_only_to_relay_and_main_harness_has_async_subagent(monkeypatch):
     captured = {}
     monkeypatch.setattr("harness.agent.ChatGoogleGenerativeAI", lambda **kwargs: object())
     monkeypatch.setattr("harness.agent.create_deep_agent", lambda **kwargs: captured.update(kwargs) or object())
-    tools = EmergencyTools(EmergencyCallContext("+19876543210"), "start_phone_call")
-    create_emergency_harness(tools)
-    assert [tool.__name__ for tool in captured["tools"]] == [
-        "send_text_message", "request_location", "start_phone_call"
-    ]
+    class VoiceTool:
+        async def verify_speaker(self):
+            return "ok"
+    create_harness(VoiceTool())
+    assert captured["subagents"][0]["name"] == "emergency"
+    assert captured["subagents"][0]["graph_id"] == "emergency"
     bridge = TwilioMediaBridge(object(), "prompt")
     from app.voice.twilio_stream import RELAY_DECLARATION
     setup = build_setup_message(LiveConfig(system_prompt=bridge.build_system_prompt(), tools=[RELAY_DECLARATION]))

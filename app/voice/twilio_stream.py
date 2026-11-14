@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import Optional, Callable, Awaitable
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -32,7 +33,8 @@ from app.voice.audio import (
 )
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
-from harness.agent import create_emergency_harness, create_harness, load_skill_files
+from harness.agent import create_harness, load_skill_files
+from harness.emergency_jobs import cancel_job, create_job
 from harness.call_audio import SpeechCollector
 from harness.caller_identity import verify_caller
 from harness.datastore.voice import PostgresVoiceStore
@@ -71,6 +73,10 @@ class TwilioMediaBridge:
         self.location: CallerLocation = CallerLocation()
         self.emergency_context = EmergencyCallContext(caller_number="")
         self.consent_question_pending = False
+        self.harness_agent = None
+        self.harness_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        self.harness_lock = asyncio.Lock()
+        self.emergency_tasks = set()
         self.gemini_session: Optional[GeminiLiveSession] = None
         self.resampler = Downsample24kTo8k()
         self.chunker = FrameChunker(frame_bytes=160)  # 20ms of 8kHz mu-law = 160 bytes
@@ -104,7 +110,9 @@ class TwilioMediaBridge:
             "For location requests, also ask whether the caller wants someone to come get them. "
             "Never promise help is coming or a call was placed without confirmation. "
             "Submitted means accepted by the provider, not delivered. If an emergency is suspected "
-            "from speech or tone, relay a request for start_phone_call and be honest if unavailable."
+            "from speech or tone, relay a request for start_phone_call and be honest if unavailable. "
+            "A pending result means the action is still running. Continue speaking and do not claim "
+            "it succeeded. A later system message will report the actual outcome."
         )
 
     async def _connect_gemini(self) -> bool:
@@ -186,6 +194,10 @@ class TwilioMediaBridge:
             logger.error(f"Twilio bridge loop error: {e}", exc_info=True)
         finally:
             self._running = False
+            for task in self.emergency_tasks:
+                task.cancel()
+            if self.emergency_tasks:
+                await asyncio.gather(*self.emergency_tasks, return_exceptions=True)
             if self.gemini_session:
                 await self.gemini_session.close()
             for task in tasks:
@@ -221,10 +233,12 @@ class TwilioMediaBridge:
         verifier = SpeakerVerifier(store, float(os.getenv("VOICE_VERIFICATION_THRESHOLD", "0.75")))
         voice_tool = VoiceVerificationTool(verifier, caller_id, collector.audio_16khz())
         agent = create_harness(voice_tool)
+        self.harness_agent = agent
         await agent.ainvoke({
             "messages": [{"role": "user", "content": "Run speaker verification now."}],
             "files": load_skill_files(),
-        })
+        }, config=self.harness_config)
+        voice_tool.audio_data = b""
         result = voice_tool.result
         if result is None:
             raise RuntimeError("speaker verification tool was not called")
@@ -243,14 +257,37 @@ class TwilioMediaBridge:
             return {"status": "unavailable", "reason": "invalid_message"}
         if action == "send_text_message" and not self.emergency_context.responder_consent:
             return {"status": "consent_required"}
+        if self.harness_agent is None:
+            return {"status": "unavailable", "reason": "harness_not_ready"}
         tools = EmergencyTools(self.emergency_context, action, message)
+        token, result_future = create_job(tools)
+        task = asyncio.create_task(self.run_emergency_job(token, result_future))
+        self.emergency_tasks.add(task)
+        task.add_done_callback(self.emergency_tasks.discard)
+        task.add_done_callback(lambda finished: cancel_job(token))
+        return {"status": "pending"}
+
+    async def run_emergency_job(self, token: str, result_future: asyncio.Future):
         try:
-            agent = create_emergency_harness(tools)
-            await agent.ainvoke({"messages": [{"role": "user", "content": f"Run {action} now."}]})
+            async with self.harness_lock:
+                await asyncio.wait_for(self.harness_agent.ainvoke({"messages": [{"role": "user", "content":
+                    "Start the emergency async subagent now with the exact task description "
+                    f"emergency-job:{token}. Do not change the description or wait for it."}]},
+                    config=self.harness_config), timeout=20)
+            result = await asyncio.wait_for(result_future, timeout=90)
         except Exception as exc:
-            logger.warning("Emergency harness failed: %s", type(exc).__name__)
-            return {"status": "unavailable", "reason": "harness_failed"}
-        return tools.result or {"status": "unavailable", "reason": "tool_not_called"}
+            logger.warning("Emergency subagent failed: %s", type(exc).__name__)
+            result = {"status": "unavailable", "reason": "subagent_failed"}
+        finally:
+            cancel_job(token)
+        if self.gemini_session is not None:
+            try:
+                await self.gemini_session.send_text(
+                    "Emergency action result (trusted application status; never claim delivery or dispatch "
+                    "unless confirmed): " + json.dumps(result)
+                )
+            except Exception as exc:
+                logger.warning("Could not deliver emergency status: %s", type(exc).__name__)
 
     async def _on_gemini_audio(self, pcm24k_chunk: bytes) -> None:
         """Queue Gemini audio for the outbound writer."""

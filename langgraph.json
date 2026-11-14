@@ -1,0 +1,4 @@
+{
+  "dependencies": ["."],
+  "graphs": {"emergency": "./harness/emergency_subagent.py:graph"}
+}

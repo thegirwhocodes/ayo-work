@@ -24,6 +24,7 @@ from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
 from harness.caller_identity import sign_caller
+from harness.emergency_jobs import execute_job
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +93,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/internal/emergency-job")
+async def emergency_job(request: Request):
+    """Consume an opaque, one-use job capability from the local agent server."""
+    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+        return Response(status_code=403)
+    body = await request.json()
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or len(token) != 43:
+        return Response(status_code=400)
+    return await execute_job(token)
 
 
 @app.get("/health")

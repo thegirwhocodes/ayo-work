@@ -26,6 +26,8 @@ class Settings:
     photon_project_id: str
     photon_sender_id: str
     emergency_responder_number: str
+    agent_server_url: str
+    emergency_callback_url: str
 
 
 @lru_cache(maxsize=1)
@@ -56,4 +58,6 @@ def get_settings() -> Settings:
         photon_project_id=value("PHOTON_PROJECT_ID"),
         photon_sender_id=value("PHOTON_SENDER_ID"),
         emergency_responder_number=value("EMERGENCY_RESPONDER_NUMBER"),
+        agent_server_url=value("AGENT_SERVER_URL", "http://127.0.0.1:2024"),
+        emergency_callback_url=value("EMERGENCY_CALLBACK_URL", "http://127.0.0.1:8000/internal/emergency-job"),
     )
