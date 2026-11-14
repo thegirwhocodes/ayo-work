@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from typing import Optional, Callable, Awaitable
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -24,7 +25,12 @@ from app.voice.audio import (
     Downsample24kTo8k,
     FrameChunker,
 )
-from app.voice.gemini_live import GeminiLiveSession
+from app.voice.gemini_live import GeminiLiveSession, LiveConfig
+from harness.agent import create_harness
+from harness.call_audio import SpeechCollector
+from harness.caller_identity import verify_caller
+from harness.datastore.voice import PostgresVoiceStore
+from harness.tools import SpeakerVerifier, VoiceVerificationTool
 
 logger = logging.getLogger("sabi.voice.twilio")
 
@@ -55,15 +61,18 @@ class TwilioMediaBridge:
         self._running = True
         logger.info("Starting Twilio Media Bridge...")
 
+        try:
+            await self.verify_call()
+        except Exception as e:
+            logger.warning("Call verification failed: %s", type(e).__name__)
+            await self.ws.close()
+            return
+
         # Create Gemini Live session
         self.gemini_session = GeminiLiveSession(
-            system_instruction=self.system_prompt,
-            voice_name=self.voice_name,
-            input_sample_rate=8000,
-            output_sample_rate=24000,
-            on_audio_out=self._on_gemini_audio,
-            on_user_transcript=self._on_user_transcript,
-            on_model_transcript=self._on_model_transcript,
+            LiveConfig(system_prompt=self.system_prompt, voice=self.voice_name),
+            on_audio=self._on_gemini_audio,
+            on_turn_complete=self.on_turn_complete,
             on_interrupted=self._on_interrupted,
         )
 
@@ -75,7 +84,7 @@ class TwilioMediaBridge:
             await self.ws.close()
             return
 
-        gemini_loop_task = asyncio.create_task(self.gemini_session.receive_loop())
+        gemini_loop_task = asyncio.create_task(self.gemini_session.receive_forever())
 
         try:
             while self._running:
@@ -119,6 +128,49 @@ class TwilioMediaBridge:
                 await self.gemini_session.close()
             gemini_loop_task.cancel()
             logger.info("Twilio Media Bridge closed.")
+
+    async def verify_call(self):
+        """Collect initial voiced audio and enroll or verify before conversation."""
+        collector = SpeechCollector()
+        caller_id = None
+        deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("not enough speech for verification")
+            data = json.loads(await asyncio.wait_for(self.ws.receive_text(), timeout=remaining))
+            event = data.get("event")
+            if event == "start":
+                start = data.get("start", {})
+                self.stream_sid = start.get("streamSid")
+                self.call_sid = start.get("callSid")
+                token = start.get("customParameters", {}).get("caller_token", "")
+                caller_id = verify_caller(token, os.getenv("TWILIO_AUTH_TOKEN", ""))
+            elif event == "media" and caller_id:
+                payload = data.get("media", {}).get("payload", "")
+                if collector.add(mulaw_to_pcm16(base64.b64decode(payload, validate=True))):
+                    break
+            elif event == "stop":
+                raise RuntimeError("call ended before verification")
+
+        store = PostgresVoiceStore(os.getenv("DATABASE_URL", ""))
+        await asyncio.to_thread(store.initialize)
+        verifier = SpeakerVerifier(store, float(os.getenv("VOICE_VERIFICATION_THRESHOLD", "0.75")))
+        voice_tool = VoiceVerificationTool(verifier, caller_id, collector.audio_16khz())
+        agent = create_harness(voice_tool)
+        await agent.ainvoke({"messages": [{"role": "user", "content": "Run speaker verification now."}]})
+        result = voice_tool.result
+        if result is None:
+            raise RuntimeError("speaker verification tool was not called")
+        if result.status not in ("matched", "enrolled"):
+            raise RuntimeError("speaker did not match enrollment")
+        logger.info("Speaker check result: %s", result.status)
+
+    async def on_turn_complete(self, caller: str, model: str):
+        if caller:
+            await self._on_user_transcript(caller)
+        if model:
+            await self._on_model_transcript(model)
 
     async def _on_gemini_audio(self, pcm24k_chunk: bytes):
         """Called when Gemini Live emits 24kHz PCM16 audio."""

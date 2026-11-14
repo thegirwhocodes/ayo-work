@@ -56,6 +56,26 @@ GEMINI_VOICE="Puck"
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+For the local Compose setup, set `GEMINI_API_KEY` and `TWILIO_AUTH_TOKEN` in
+`.env`, then run `docker compose --profile dev up --build`. This starts the app
+and a Postgres container with a persistent development volume. For a local
+non-Compose server, set `DATABASE_URL` to a PostgreSQL connection string.
+
+The Twilio webhook validates the request signature and passes a short-lived
+signed caller number to the media stream. At call start, the service collects
+five seconds of detected speech (up to 30 seconds), then uses the Deep Agents
+harness to enroll the first embedding for that number or compare subsequent
+calls. A failed match, insufficient speech, missing identity, or verification
+error ends the call. AudioSocket calls currently end because that protocol
+does not provide the persistent caller number required by this flow.
+
+`VOICE_VERIFICATION_THRESHOLD` defaults to 0.75 for demonstration only; it
+must be calibrated on representative telephone recordings before relying on
+matches. Phone numbers and voice embeddings are stored in Postgres and a phone
+number or voice match is not proof of identity. The development database uses
+local-only example credentials and is not a production data protection setup.
+The first call creates an enrollment without independently proving identity.
+
 ---
 
 ## 🧪 Running Tests

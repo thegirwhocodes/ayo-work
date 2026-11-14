@@ -14,6 +14,8 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import parse_qsl
+from xml.sax.saxutils import quoteattr
 
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +23,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
+from harness.caller_identity import sign_caller
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,11 +118,26 @@ async def voice_incoming(request: Request):
     """
     host = request.headers.get("host", "localhost:8000")
     protocol = "wss" if "https" in str(request.base_url) else "ws"
+    form = dict(parse_qsl((await request.body()).decode("utf-8")))
+    caller = form.get("From", "")
+    secret = os.getenv("TWILIO_AUTH_TOKEN", "")
+    parameter = ""
+    if caller and secret:
+        from twilio.request_validator import RequestValidator
+
+        if not RequestValidator(secret).validate(str(request.url), form, request.headers.get("X-Twilio-Signature", "")):
+            return Response(status_code=403)
+        try:
+            token = sign_caller(caller, secret)
+        except ValueError:
+            return Response(status_code=400)
+        parameter = f'<Parameter name="caller_token" value={quoteattr(token)} />'
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+    <Say>We use your voice to recognize you on future calls. Please speak for a few seconds.</Say>
     <Connect>
-        <Stream url="{protocol}://{host}/ws/twilio" />
+        <Stream url="{protocol}://{host}/ws/twilio">{parameter}</Stream>
     </Connect>
 </Response>"""
 

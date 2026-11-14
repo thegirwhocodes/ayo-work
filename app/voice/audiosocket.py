@@ -57,73 +57,14 @@ class AudioSocketConnection:
         self._running = False
 
     async def handle(self):
-        self._running = True
-        peername = self.writer.get_extra_info("peername")
-        logger.info(f"New AudioSocket connection from {peername}")
-
-        self.gemini_session = GeminiLiveSession(
-            system_instruction=self.system_prompt,
-            voice_name=self.voice_name,
-            input_sample_rate=8000,
-            output_sample_rate=24000,
-            on_audio_out=self._on_gemini_audio,
-            on_user_transcript=self._on_user_transcript,
-            on_model_transcript=self._on_model_transcript,
-            on_interrupted=self._on_interrupted,
-        )
-
-        try:
-            await self.gemini_session.connect()
-        except Exception as e:
-            logger.error(f"Failed to connect to Gemini Live: {e}")
-            self.writer.close()
-            await self.writer.wait_closed()
-            return
-
-        gemini_loop_task = asyncio.create_task(self.gemini_session.receive_loop())
-
-        try:
-            while self._running:
-                header = await self.reader.readexactly(3)
-                msg_type, length = HEADER_STRUCT.unpack(header)
-
-                payload = b""
-                if length > 0:
-                    payload = await self.reader.readexactly(length)
-
-                if msg_type == TYPE_AUDIO:
-                    # Inbound 8kHz PCM16 from Asterisk -> feed to Gemini Live
-                    if self.gemini_session:
-                        await self.gemini_session.send_audio(payload)
-
-                elif msg_type == TYPE_UUID:
-                    if len(payload) == 16:
-                        self.call_uuid = uuid.UUID(bytes=payload)
-                        logger.info(f"AudioSocket Call UUID: {self.call_uuid}")
-
-                elif msg_type == TYPE_HANGUP:
-                    logger.info(f"AudioSocket hangup received for {self.call_uuid}")
-                    break
-
-                elif msg_type == TYPE_ERROR:
-                    logger.warning(f"AudioSocket error received: {payload}")
-                    break
-
-        except (asyncio.IncompleteReadError, ConnectionResetError):
-            logger.info("AudioSocket connection closed by remote Asterisk")
-        except Exception as e:
-            logger.error(f"Error handling AudioSocket: {e}", exc_info=True)
-        finally:
-            self._running = False
-            if self.gemini_session:
-                await self.gemini_session.close()
-            gemini_loop_task.cancel()
-            self.writer.close()
-            try:
-                await self.writer.wait_closed()
-            except Exception:
-                pass
-            logger.info("AudioSocket connection terminated")
+        # AudioSocket carries a call UUID, not a persistent phone number. Until
+        # the PBX supplies a trusted caller identity, verification must fail.
+        logger.warning("Closing AudioSocket call: caller identity is unavailable for voice verification")
+        self.writer.write(HEADER_STRUCT.pack(TYPE_HANGUP, 0))
+        await self.writer.drain()
+        self.writer.close()
+        await self.writer.wait_closed()
+        return
 
     async def _on_gemini_audio(self, pcm24k_chunk: bytes):
         """Downsample 24kHz PCM16 -> 8kHz PCM16 and stream to Asterisk."""

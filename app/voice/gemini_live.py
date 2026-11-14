@@ -87,7 +87,7 @@ def build_setup_message(cfg: LiveConfig) -> dict[str, Any]:
     return {"setup": setup}
 
 
-AudioHandler = Callable[[bytes], None]
+AudioHandler = Callable[[bytes], Awaitable[None]]
 TextHandler = Callable[[str], Awaitable[None]]
 EventHandler = Callable[[], Awaitable[None]]
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -197,7 +197,7 @@ class GeminiLiveSession:
             for part in (content.get("modelTurn") or {}).get("parts") or []:
                 data = (part.get("inlineData") or {}).get("data")
                 if data:
-                    self.on_audio(base64.b64decode(data))
+                    await self.on_audio(base64.b64decode(data))
 
             if content.get("turnComplete"):
                 caller, model = self._caller_text.strip(), self._model_text.strip()

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   sabi-safe:
     build: .
@@ -11,7 +9,33 @@ services:
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_VOICE=${GEMINI_VOICE:-Puck}
+      - HARNESS_MODEL=${HARNESS_MODEL:-gemini-2.5-flash}
       - AUDIOSOCKET_PORT=9020
       - ENABLE_AUDIOSOCKET=true
+      - DATABASE_URL=${DATABASE_URL:-postgresql://sabi:sabi_dev_password@postgres:5432/sabi_safe}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - VOICE_VERIFICATION_THRESHOLD=${VOICE_VERIFICATION_THRESHOLD:-0.75}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
     volumes:
       - .:/app
+
+  postgres:
+    profiles: [dev]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sabi
+      POSTGRES_PASSWORD: sabi_dev_password
+      POSTGRES_DB: sabi_safe
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sabi -d sabi_safe"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
