@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Optional, Callable, Awaitable
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -31,13 +32,23 @@ from app.voice.audio import (
 )
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
-from harness.agent import create_harness
+from harness.agent import create_emergency_harness, create_harness, load_skill_files
 from harness.call_audio import SpeechCollector
 from harness.caller_identity import verify_caller
 from harness.datastore.voice import PostgresVoiceStore
-from harness.tools import SpeakerVerifier, VoiceVerificationTool
+from harness.tools import EmergencyCallContext, EmergencyTools, SpeakerVerifier, VoiceVerificationTool
 
 logger = logging.getLogger("sabi.voice.twilio")
+
+CONSENT_QUESTION = "may i text the emergency responder with what you shared"
+RELAY_DECLARATION = {
+    "name": "relay_to_harness",
+    "description": "Relay a requested emergency action to the harness. Ask permission before requesting a responder text.",
+    "parameters": {"type": "OBJECT", "properties": {
+        "action": {"type": "STRING", "enum": ["send_text_message", "request_location", "start_phone_call"]},
+        "message": {"type": "STRING", "description": "Information to include in a responder message; omit for other actions."},
+    }, "required": ["action"]},
+}
 
 
 class TwilioMediaBridge:
@@ -58,6 +69,8 @@ class TwilioMediaBridge:
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
         self.location: CallerLocation = CallerLocation()
+        self.emergency_context = EmergencyCallContext(caller_number="")
+        self.consent_question_pending = False
         self.gemini_session: Optional[GeminiLiveSession] = None
         self.resampler = Downsample24kTo8k()
         self.chunker = FrameChunker(frame_bytes=160)  # 20ms of 8kHz mu-law = 160 bytes
@@ -84,19 +97,29 @@ class TwilioMediaBridge:
 
     def build_system_prompt(self) -> str:
         """Base trauma-informed prompt plus this caller's location briefing."""
-        return self.system_prompt + build_location_briefing(self.location)
+        return self.system_prompt + build_location_briefing(self.location) + (
+            "\nFor emergency actions use relay_to_harness. Before requesting a responder text, "
+            "ask exactly: 'May I text the emergency responder with what you shared?' "
+            "Wait for the caller's clear yes; never claim consent yourself. "
+            "For location requests, also ask whether the caller wants someone to come get them. "
+            "Never promise help is coming or a call was placed without confirmation. "
+            "Submitted means accepted by the provider, not delivered. If an emergency is suspected "
+            "from speech or tone, relay a request for start_phone_call and be honest if unavailable."
+        )
 
     async def _connect_gemini(self) -> bool:
         cfg = LiveConfig(
             system_prompt=self.build_system_prompt(),
             voice=self.voice_name,
             input_rate=8000,
+            tools=[RELAY_DECLARATION],
         )
         self.gemini_session = GeminiLiveSession(
             cfg,
             on_audio=self._on_gemini_audio,
             on_interrupted=self._on_interrupted,
             on_turn_complete=self._on_turn_complete,
+            on_tool_call=self.relay_to_harness,
         )
         try:
             await self.gemini_session.connect()
@@ -185,6 +208,7 @@ class TwilioMediaBridge:
                 self.handle_start(start)
                 token = start.get("customParameters", {}).get("caller_token", "")
                 caller_id = verify_caller(token, os.getenv("TWILIO_AUTH_TOKEN", ""))
+                self.emergency_context.caller_number = caller_id
             elif event == "media" and caller_id:
                 payload = data.get("media", {}).get("payload", "")
                 if collector.add(mulaw_to_pcm16(base64.b64decode(payload, validate=True))):
@@ -197,13 +221,36 @@ class TwilioMediaBridge:
         verifier = SpeakerVerifier(store, float(os.getenv("VOICE_VERIFICATION_THRESHOLD", "0.75")))
         voice_tool = VoiceVerificationTool(verifier, caller_id, collector.audio_16khz())
         agent = create_harness(voice_tool)
-        await agent.ainvoke({"messages": [{"role": "user", "content": "Run speaker verification now."}]})
+        await agent.ainvoke({
+            "messages": [{"role": "user", "content": "Run speaker verification now."}],
+            "files": load_skill_files(),
+        })
         result = voice_tool.result
         if result is None:
             raise RuntimeError("speaker verification tool was not called")
         if result.status not in ("matched", "enrolled"):
             raise RuntimeError("speaker did not match enrollment")
         logger.info("Speaker check result: %s", result.status)
+
+    async def relay_to_harness(self, name: str, args: dict) -> dict:
+        if name != "relay_to_harness" or not isinstance(args, dict):
+            return {"status": "unavailable", "reason": "unknown_tool"}
+        action = args.get("action")
+        if action not in {"send_text_message", "request_location", "start_phone_call"}:
+            return {"status": "unavailable", "reason": "unknown_action"}
+        message = args.get("message", "")
+        if not isinstance(message, str) or len(message) > 1600:
+            return {"status": "unavailable", "reason": "invalid_message"}
+        if action == "send_text_message" and not self.emergency_context.responder_consent:
+            return {"status": "consent_required"}
+        tools = EmergencyTools(self.emergency_context, action, message)
+        try:
+            agent = create_emergency_harness(tools)
+            await agent.ainvoke({"messages": [{"role": "user", "content": f"Run {action} now."}]})
+        except Exception as exc:
+            logger.warning("Emergency harness failed: %s", type(exc).__name__)
+            return {"status": "unavailable", "reason": "harness_failed"}
+        return tools.result or {"status": "unavailable", "reason": "tool_not_called"}
 
     async def _on_gemini_audio(self, pcm24k_chunk: bytes) -> None:
         """Queue Gemini audio for the outbound writer."""
@@ -252,10 +299,20 @@ class TwilioMediaBridge:
 
     async def _on_turn_complete(self, caller_text: str, model_text: str):
         if caller_text:
+            answer = re.sub(r"[^a-z ]", "", caller_text.lower()).strip()
+            if self.consent_question_pending:
+                self.emergency_context.responder_consent = answer in {
+                    "yes", "yes please", "yes you may", "yes i agree", "i agree", "please do"
+                }
+                self.consent_question_pending = False
+            elif answer in {"no", "no thanks", "stop", "i changed my mind"}:
+                self.emergency_context.responder_consent = False
             logger.info(f"[CALLER]: {caller_text}")
             if self.on_transcript:
                 await self.on_transcript("caller", caller_text)
         if model_text:
+            normalized = re.sub(r"[^a-z ]", "", model_text.lower())
+            self.consent_question_pending = CONSENT_QUESTION in normalized
             logger.info(f"[SABI]: {model_text}")
             if self.on_transcript:
                 await self.on_transcript("assistant", model_text)

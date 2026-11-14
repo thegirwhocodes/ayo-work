@@ -10,6 +10,10 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_VOICE=${GEMINI_VOICE:-Puck}
       - HARNESS_MODEL=${HARNESS_MODEL:-gemini-2.5-flash}
+      - PHOTON_API_KEY=${PHOTON_API_KEY:-}
+      - PHOTON_PROJECT_ID=${PHOTON_PROJECT_ID:-}
+      - PHOTON_SENDER_ID=${PHOTON_SENDER_ID:-}
+      - EMERGENCY_RESPONDER_NUMBER=${EMERGENCY_RESPONDER_NUMBER:-}
       - AUDIOSOCKET_PORT=9020
       - ENABLE_AUDIOSOCKET=true
       - DATABASE_URL=${DATABASE_URL:-postgresql://sabi:sabi_dev_password@postgres:5432/sabi_safe}

@@ -4,6 +4,10 @@ from harness.tools.verify_voice import (
     MODEL_SOURCE, SpeakerVerifier, VoiceVerificationResult, VoiceVerificationTool,
     compare_voice_features, extract_voice_features,
 )
+from harness.tools.emergency import (
+    EmergencyCallContext, EmergencyTools, PhotonMessaging,
+    request_location, send_text_message, start_phone_call,
+)
 
 __all__ = [
     "MODEL_SOURCE",
@@ -12,4 +16,6 @@ __all__ = [
     "VoiceVerificationTool",
     "compare_voice_features",
     "extract_voice_features",
+    "EmergencyCallContext", "EmergencyTools", "PhotonMessaging",
+    "request_location", "send_text_message", "start_phone_call",
 ]

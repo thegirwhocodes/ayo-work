@@ -76,6 +76,22 @@ number or voice match is not proof of identity. The development database uses
 local-only example credentials and is not a production data protection setup.
 The first call creates an enrollment without independently proving identity.
 
+The Deep Agents harness bundles the Empathy and CBT skills under
+`harness/skills/`. Their descriptions are discoverable by the harness and their
+instructions and reference documents are loaded on demand. The harness currently
+handles voice verification; Gemini Live handles the separate spoken conversation,
+so these skills do not yet guide the caller-facing voice agent.
+
+Emergency SMS uses Photon 2.0. Set `PHOTON_API_KEY`, `PHOTON_PROJECT_ID`,
+`PHOTON_SENDER_ID` (a project-owned SMS agent User ID), and
+`EMERGENCY_RESPONDER_NUMBER` (E.164). A responder text requires the caller's
+clear agreement to the agent's permission question. The location request texts
+the caller, but inbound SMS replies are not processed. Photon acceptance is not
+proof of delivery, and outbound calls are not implemented. The consent check is
+conservative and depends on speech transcription; unclear answers require the
+caller to repeat their agreement. Confirm that the configured recipient can
+actually receive and act on SMS before relying on this integration.
+
 ---
 
 ## 🧪 Running Tests
