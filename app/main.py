@@ -10,6 +10,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -24,7 +25,8 @@ from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
 from harness.caller_identity import sign_caller
-from harness.emergency_jobs import execute_job
+from harness.emergency_jobs import execute_job, purge_expired_jobs
+from settings import get_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,10 +55,22 @@ ENABLE_AUDIOSOCKET = os.getenv("ENABLE_AUDIOSOCKET", "true").lower() in ("true",
 audiosocket_server: asyncio.Server | None = None
 
 
+async def maintain_emergency_jobs():
+    while True:
+        try:
+            await purge_expired_jobs()
+        except Exception as exc:
+            logger.warning("Emergency job cleanup failed: %s", type(exc).__name__)
+        await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global audiosocket_server
     logger.info("Initializing Sabi Safe services...")
+    cleanup_task = None
+    if get_settings().emergency_job_encryption_key:
+        cleanup_task = asyncio.create_task(maintain_emergency_jobs())
 
     # Start Asterisk AudioSocket server in background if enabled
     if ENABLE_AUDIOSOCKET:
@@ -73,6 +87,9 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Sabi Safe services...")
+    if cleanup_task:
+        cleanup_task.cancel()
+        await asyncio.gather(cleanup_task, return_exceptions=True)
     if audiosocket_server:
         audiosocket_server.close()
         await audiosocket_server.wait_closed()
@@ -97,14 +114,20 @@ app.add_middleware(
 
 @app.post("/internal/emergency-job")
 async def emergency_job(request: Request):
-    """Consume an opaque, one-use job capability from the local agent server."""
-    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+    """Consume a one-use job capability from an authenticated agent worker."""
+    secret = get_settings().emergency_worker_secret
+    supplied = request.headers.get("X-Emergency-Worker-Key", "")
+    if len(secret) < 32 or not hmac.compare_digest(supplied, secret):
         return Response(status_code=403)
     body = await request.json()
     token = body.get("token") if isinstance(body, dict) else None
     if not isinstance(token, str) or len(token) != 43:
         return Response(status_code=400)
-    return await execute_job(token)
+    try:
+        return await execute_job(token)
+    except Exception as exc:
+        logger.warning("Emergency job store unavailable: %s", type(exc).__name__)
+        return Response(status_code=503)
 
 
 @app.get("/health")

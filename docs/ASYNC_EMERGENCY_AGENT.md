@@ -1,31 +1,66 @@
-# Local async emergency subagent
+# Async emergency agent deployment
 
-The FastAPI app owns each call's emergency context and runs the emergency tools.
-The main Deep Agents harness launches an `emergency` async subagent through a
-local Agent Protocol server. The server graph receives only an opaque, one-use
-job capability; it calls back to the application, which rechecks the caller's
-consent and runs the requested tool. The app sends the actual result to Gemini
-Live as a later message. Phone numbers, message text, and consent are not passed
-in the subagent task description.
+The application runs one per-call Deep Agents harness and delegates emergency
+jobs to a standalone Agent Protocol server. The callback executes the authorized
+job through the application and returns the outcome to the active call. The
+server receives an opaque one-use capability, not caller details or message
+text. A shared PostgreSQL job store permits callbacks to reach a different
+application worker. Job payloads and results are encrypted with Fernet and
+capabilities are stored as SHA-256 hashes.
 
-For local development, install `requirements.txt` and
-`requirements-agent-server.txt`, then run both processes on the same host:
+## Configuration
 
-```bash
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-.venv/bin/langgraph dev --config langgraph.json --host 127.0.0.1 --port 2024 --no-browser --n-jobs-per-worker 10
-```
+Set these environment variables in the deployment's secret manager or `.env`:
 
-Set `AGENT_SERVER_URL` if the Agent Protocol server is on a different local
-port, and `EMERGENCY_CALLBACK_URL` for the app callback if needed. Both default
-to loopback URLs. The callback only accepts a one-use capability and only from
-loopback. Run a single application worker: active job capabilities live in
-that process's memory and are lost on restart. Disable external tracing for
-these processes unless its handling of short-lived capabilities is approved.
+- `DATABASE_URL`: application PostgreSQL database, reachable from the app and
+  `emergency-migrate` service.
+- `EMERGENCY_JOB_ENCRYPTION_KEY`: Fernet key. Generate with
+  `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
+- `EMERGENCY_WORKER_SECRET`: an independent random secret of at least 32
+  characters. Generate with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
+- `AGENT_SERVER_AUTH_SECRET`: a different random secret of at least 32
+  characters for the app's Agent Protocol requests.
+- `AGENT_DATABASE_URI`: a **separate** PostgreSQL database for Agent Server's
+  threads, runs, and checkpoints. Do not share a database with another Agent
+  Server deployment.
+- `LANGSMITH_API_KEY` and, when required by your deployment,
+  `LANGGRAPH_CLOUD_LICENSE_KEY`: Agent Server credentials. Check your LangSmith
+  license and egress requirements.
+- `AGENT_REDIS_URI`: Redis URI; Compose defaults to the private `agent-redis`
+  service. Use a dedicated Redis database for this deployment.
 
-`langgraph dev` is an in-memory development server, not a production server.
-For a VPS deployment, use a production Agent Protocol server with authentication,
-private networking, durable infrastructure, and a shared authorized job store;
-the development configuration does not provide those guarantees. The outbound
-phone-call tool is still a stub. A pending or submitted result is not proof of
-delivery or dispatch.
+The existing Gemini, Twilio, Photon and responder configuration is still
+required. Keep secrets out of source control; use separate keys per environment.
+Losing or rotating the Fernet key without a migration makes outstanding jobs
+unreadable. Keep tracing disabled unless its handling of capabilities and
+sensitive call context has been reviewed.
+
+`docker compose --profile dev up --build` runs the app, its local application
+Postgres, the migration, Redis, and the dedicated Agent Server image. It still
+requires a separately provisioned `AGENT_DATABASE_URI` and valid Agent Server
+credentials. For a VPS, provide managed or separately operated databases,
+configure TLS and access controls, and run the same migration before app
+startup. The agent and Redis services have no published host ports. The
+`emergency-migrate` service applies the job schema before the app starts. The
+Agent Server and the application callback authenticate each other using separate
+shared secrets, and neither Agent Server nor Redis publishes a host port.
+
+## Delivery and safety properties
+
+A database-atomic claim prevents concurrent workers from executing the same job
+twice. Caller consent is checked before creating a responder job; pending jobs
+are cancelled when consent is withdrawn or the call ends. A request already
+claimed or submitted to Photon cannot reliably be recalled. A process crash or
+timeout after claim may leave the outcome unknown; this system does not retry
+that send automatically or claim it was delivered. Completed and cancelled job
+payloads are erased; expired records are purged by an application background
+loop. A supervisor model or server failure is reported as unavailable/unknown.
+
+Compose on a single VPS does not itself provide high availability, backups,
+disaster recovery, zero-downtime draining, delivery receipts, or guaranteed
+response. LangChain's tested production deployment path is its maintained
+Kubernetes Helm chart; operating standalone Compose requires independently
+managing these gaps. Do not treat an accepted SMS as verified emergency dispatch.
+The outbound phone-call tool remains a stub. Test with the actual provider,
+responder organization, and relevant safeguarding experts before relying on it
+for real emergency response.

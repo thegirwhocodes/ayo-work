@@ -40,6 +40,7 @@ def create_harness(voice_tool: VoiceVerificationTool):
             description="Run an authorized emergency action in the background.",
             graph_id="emergency",
             url=get_settings().agent_server_url,
+            headers={"Authorization": f"Bearer {get_settings().agent_server_auth_secret}"},
             notify_parent=False,
         )],
         checkpointer=InMemorySaver(),

@@ -70,6 +70,28 @@ def test_no_consent_and_photon_failure_do_not_claim_success(monkeypatch):
     assert run(exercise())["status"] == "unavailable"
 
 
+def test_message_timeout_is_unknown_and_not_retried(monkeypatch):
+    monkeypatch.setenv("PHOTON_API_KEY", "secret")
+    monkeypatch.setenv("PHOTON_PROJECT_ID", "project")
+    monkeypatch.setenv("PHOTON_SENDER_ID", "sender")
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.url.path)
+        if request.url.path.endswith("/users"):
+            return httpx.Response(200, json={"id": "recipient"})
+        if request.url.path.endswith("/spaces"):
+            return httpx.Response(200, json={"id": "space"})
+        raise httpx.ReadTimeout("submission response lost", request=request)
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await request_location(EmergencyCallContext("+19876543210"), PhotonMessaging(client))
+
+    assert run(exercise())["status"] == "unknown"
+    assert sum(path.endswith("/messages") for path in attempts) == 1
+
+
 def test_consent_and_relay_fail_closed(monkeypatch):
     bridge = TwilioMediaBridge(object(), "prompt")
     bridge.emergency_context.caller_number = "+19876543210"
@@ -81,12 +103,26 @@ def test_consent_and_relay_fail_closed(monkeypatch):
     run(give_consent())
     assert bridge.emergency_context.responder_consent
 
+    finished = {}
+
+    async def create(tools, session_id):
+        return "x" * 43
+
+    async def poll(token):
+        return finished.get(token)
+
+    async def cancel(token):
+        pass
+
+    monkeypatch.setattr("app.voice.twilio_stream.create_job", create)
+    monkeypatch.setattr("app.voice.twilio_stream.get_job_result", poll)
+    monkeypatch.setattr("app.voice.twilio_stream.cancel_job", cancel)
+
     class Agent:
         async def ainvoke(self, payload, config=None):
-            from harness.emergency_jobs import execute_job
             import re
             token = re.search(r"emergency-job:([A-Za-z0-9_-]{43})", payload["messages"][0]["content"]).group(1)
-            await execute_job(token)
+            finished[token] = {"status": "not_implemented"}
 
     class Session:
         def __init__(self):

@@ -40,10 +40,16 @@ class PhotonMessaging:
             user.raise_for_status()
             space = await client.post(f"{base}/spaces", headers=headers, json={"platform": "sms", "participantIds": [sender, user.json()["id"]]})
             space.raise_for_status()
-            response = await client.post(f"{base}/messages", headers=headers, json={
-                "spaceId": space.json()["id"], "senderId": sender,
-                "content": {"type": "text", "format": "plain", "text": text},
-            })
+            try:
+                response = await client.post(f"{base}/messages", headers=headers, json={
+                    "spaceId": space.json()["id"], "senderId": sender,
+                    "content": {"type": "text", "format": "plain", "text": text},
+                })
+            except httpx.TransportError:
+                # The provider may have accepted the message before the connection failed.
+                return {"status": "unknown", "reason": "message_submission_uncertain"}
+            if response.status_code >= 500:
+                return {"status": "unknown", "reason": "message_submission_uncertain"}
             response.raise_for_status()
             if response.status_code != 202:
                 return {"status": "unavailable", "reason": "unexpected_photon_response"}

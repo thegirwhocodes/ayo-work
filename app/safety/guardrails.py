@@ -100,7 +100,7 @@ def guard_input(text: str) -> GuardResult:
 
     # 1. Immediate danger
     if IMMEDIATE_DANGER_PATTERN.search(text_lower):
-        logger.warning(f"Immediate danger triggered: {text}")
+        logger.warning("Immediate danger triggered")
         return GuardResult(
             allowed=False,
             short_circuit=True,
@@ -110,7 +110,7 @@ def guard_input(text: str) -> GuardResult:
 
     # 2. Self-harm / suicide
     if SELF_HARM_PATTERN.search(text_lower):
-        logger.warning(f"Self-harm triggered: {text}")
+        logger.warning("Self-harm triggered")
         return GuardResult(
             allowed=False,
             short_circuit=True,
@@ -120,7 +120,7 @@ def guard_input(text: str) -> GuardResult:
 
     # 3. Child abuse disclosure
     if ABUSE_PATTERN.search(text_lower):
-        logger.warning(f"Abuse disclosure triggered: {text}")
+        logger.warning("Abuse disclosure triggered")
         return GuardResult(
             allowed=False,
             short_circuit=True,

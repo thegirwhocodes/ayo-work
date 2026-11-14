@@ -19,9 +19,13 @@ async def execute_emergency_job(state: EmergencyState) -> dict:
     if not match:
         return {"messages": [{"role": "assistant", "content": "Invalid emergency job."}]}
     callback = get_settings().emergency_callback_url
+    secret = get_settings().emergency_worker_secret
+    if len(secret) < 32:
+        return {"messages": [{"role": "assistant", "content": "Emergency worker authentication is not configured."}]}
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(callback, json={"token": match.group(1)})
+            response = await client.post(callback, json={"token": match.group(1)},
+                                         headers={"X-Emergency-Worker-Key": secret})
             response.raise_for_status()
             status = response.json().get("status")
     except (httpx.HTTPError, ValueError):
