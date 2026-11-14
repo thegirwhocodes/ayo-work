@@ -23,6 +23,7 @@ from fastapi.responses import PlainTextResponse
 from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
+from harness.caller_identity import sign_caller
 
 logging.basicConfig(
     level=logging.INFO,
@@ -144,8 +145,21 @@ async def voice_incoming(request: Request):
     """
     host = request.headers.get("host", "localhost:8000")
     protocol = "wss" if "https" in str(request.base_url) else "ws"
-
     params = await _twilio_params(request)
+    caller = params.get("From", "")
+    secret = os.getenv("TWILIO_AUTH_TOKEN", "")
+    parameter = ""
+    if caller and secret:
+        from twilio.request_validator import RequestValidator
+
+        if not RequestValidator(secret).validate(str(request.url), params if request.method == "POST" else {}, request.headers.get("X-Twilio-Signature", "")):
+            return Response(status_code=403)
+        try:
+            token = sign_caller(caller, secret)
+        except ValueError:
+            return Response(status_code=400)
+        parameter = f'<Parameter name="caller_token" value={quoteattr(token)} />'
+
     location = from_twilio_webhook(params)
     logger.info(
         "Inbound call from %s | location=%s country=%s source=%s call_sid=%s",
@@ -163,8 +177,9 @@ async def voice_incoming(request: Request):
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+    <Say>We use your voice to recognize you on future calls. Please speak for a few seconds.</Say>
     <Connect>
-        <Stream url="{protocol}://{host}/ws/twilio">{stream_params}
+        <Stream url="{protocol}://{host}/ws/twilio">{parameter}{stream_params}
         </Stream>
     </Connect>
 </Response>"""
