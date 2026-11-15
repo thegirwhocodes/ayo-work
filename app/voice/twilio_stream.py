@@ -33,6 +33,7 @@ from app.voice.audio import (
 )
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
+from app.voice.openai_realtime import OpenAIRealtimeSession
 from harness.agent import create_harness, load_skill_files
 from harness.emergency_jobs import cancel_job, cancel_session_jobs, create_job, get_job_result
 from harness.call_audio import SpeechCollector
@@ -45,6 +46,7 @@ from harness.coordinator import Coordinator, GeminiStructuredLLM, load_skills_te
 from harness.support import extract_preferences
 from harness.tools.declarations import RELAY_DECLARATION, SUPPORT_GUIDANCE_DECLARATION
 from harness.tools import EmergencyCallContext, EmergencyTools, SpeakerVerifier, VoiceVerificationTool
+from settings import get_settings
 
 logger = logging.getLogger("sabi.voice.twilio")
 
@@ -136,7 +138,10 @@ class TwilioMediaBridge:
             input_rate=8000,
             tools=[RELAY_DECLARATION] + ([SUPPORT_GUIDANCE_DECLARATION] if self.coordinator else []),
         )
-        self.gemini_session = GeminiLiveSession(
+        # VOICE_ENGINE=openai: OpenAI Realtime hears + thinks, ElevenLabs speaks (Ayo).
+        # Anything else keeps the original Gemini Live engine. Both share one interface.
+        engine = OpenAIRealtimeSession if get_settings().voice_engine == "openai" else GeminiLiveSession
+        self.gemini_session = engine(
             cfg,
             on_audio=self._on_gemini_audio,
             on_interrupted=self._on_interrupted,
@@ -147,7 +152,7 @@ class TwilioMediaBridge:
             await self.gemini_session.connect()
             return True
         except Exception as e:
-            logger.error(f"Failed to connect to Gemini Live: {e}")
+            logger.error(f"Failed to connect to the voice engine: {e}")
             self.gemini_session = None
             return False
 

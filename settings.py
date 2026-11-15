@@ -31,6 +31,12 @@ class Settings:
     emergency_worker_secret: str = field(repr=False)
     agent_server_auth_secret: str = field(repr=False)
     emergency_job_encryption_key: str = field(repr=False)
+    voice_engine: str
+    openai_api_key: str = field(repr=False)
+    openai_realtime_model: str
+    elevenlabs_api_key: str = field(repr=False)
+    elevenlabs_voice_id: str
+    elevenlabs_model: str
 
 
 @lru_cache(maxsize=1)
@@ -66,4 +72,10 @@ def get_settings() -> Settings:
         emergency_worker_secret=value("EMERGENCY_WORKER_SECRET"),
         agent_server_auth_secret=value("AGENT_SERVER_AUTH_SECRET"),
         emergency_job_encryption_key=value("EMERGENCY_JOB_ENCRYPTION_KEY"),
+        voice_engine=value("VOICE_ENGINE", "gemini").strip().lower(),
+        openai_api_key=value("OPENAI_API_KEY"),
+        openai_realtime_model=value("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
+        elevenlabs_api_key=value("ELEVENLABS_API_KEY"),
+        elevenlabs_voice_id=value("ELEVENLABS_VOICE_ID", "oC2pCZZWEDRe6lmZpaaw"),
+        elevenlabs_model=value("ELEVENLABS_MODEL", "eleven_v4_turbo"),
     )
