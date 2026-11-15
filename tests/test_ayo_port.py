@@ -45,6 +45,7 @@ def test_twiml_drops_robot_voice_only_when_greeting_is_configured(monkeypatch):
     from app import main
 
     client = TestClient(main.app)
+    monkeypatch.setattr(main, "GREETING_AUDIO", b"")
     assert "<Say>" in client.post("/voice/incoming", headers={"host": "x"}).text
     monkeypatch.setattr(main, "GREETING_AUDIO", b"\xff" * 10)
     xml = client.post("/voice/incoming", headers={"host": "x"}).text

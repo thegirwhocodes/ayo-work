@@ -43,11 +43,11 @@ except ImportError:  # the real environment is authoritative in containers
     pass
 
 # Load system prompt.
-# Ayo's real prompt is kept out of this public repo. Point AYO_PROMPT_PATH at a private copy
-# (e.g. private/ayo_prompt.md, git-ignored; source of truth is the private `ayo` repo).
-# Without it the bundled public prompt is used, exactly as before.
+# Ayo's prompt ships in this repo (app/prompts/ayo_prompt.md). AYO_PROMPT_PATH can override it with
+# another file (e.g. a local experiment). Fortune's original prompt stays as a last-resort fallback.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PROMPT_PATH = Path(__file__).parent / "prompts" / "sabi_safe_prompt.md"
+PROMPT_PATH = Path(__file__).parent / "prompts" / "ayo_prompt.md"
+LEGACY_PROMPT_PATH = Path(__file__).parent / "prompts" / "sabi_safe_prompt.md"
 
 
 def _resolve(path: str) -> Path:
@@ -60,11 +60,12 @@ def load_system_prompt() -> str:
     if private_path:
         resolved = _resolve(private_path)
         if resolved.is_file():
-            logger.info("Using the private Ayo prompt from AYO_PROMPT_PATH")
+            logger.info("Using the prompt from AYO_PROMPT_PATH")
             return resolved.read_text(encoding="utf-8")
-        logger.warning("AYO_PROMPT_PATH is set but the file is missing; using the bundled prompt")
-    if PROMPT_PATH.exists():
-        return PROMPT_PATH.read_text(encoding="utf-8")
+        logger.warning("AYO_PROMPT_PATH is set but the file is missing; using the bundled Ayo prompt")
+    for path in (PROMPT_PATH, LEGACY_PROMPT_PATH):
+        if path.exists():
+            return path.read_text(encoding="utf-8")
     return "You are Ayo, a calm, warm listening friend on a free phone line for children."
 
 

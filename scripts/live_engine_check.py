@@ -58,6 +58,6 @@ async def run(clip: str, prompt: str, country: str) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("clip"); ap.add_argument("--prompt", default="app/prompts/sabi_safe_prompt.md"); ap.add_argument("--country", default="NG")
+    ap.add_argument("clip"); ap.add_argument("--prompt", default="app/prompts/ayo_prompt.md"); ap.add_argument("--country", default="NG")
     a = ap.parse_args()
     asyncio.run(run(a.clip, Path(a.prompt).read_text(encoding="utf-8"), a.country))

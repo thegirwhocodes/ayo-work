@@ -6,7 +6,7 @@
 
 **Built and tested (107 passed, 3 skipped):**
 - OpenAI Realtime + Bukola engine behind `VOICE_ENGINE=openai` (`app/voice/openai_realtime.py`), tool converter, settings, `.env.example`, Compose.
-- Private prompt via `AYO_PROMPT_PATH` (git-ignored `private/`), with Ayo's `{RUNTIME_CONTEXT}` slot filled by the caller briefing; consent sentence untouched.
+- Ayo's prompt in `app/prompts/ayo_prompt.md` (public, Naomi's call Nov 14; `AYO_PROMPT_PATH` overrides), with Ayo's `{RUNTIME_CONTEXT}` slot filled by the caller briefing; consent sentence untouched.
 - Bukola greeting from `AYO_GREETING_AUDIO` plays at stream start (Twilio `<Say>` dropped when set).
 - Caller audio spoken during the voice check is replayed to the engine so Ayo answers the first words.
 - Silence check-in (8 s, once per silence) in the engine; `[softly]`/`[whispers]` exempted from the prompt's "no brackets" rule.
