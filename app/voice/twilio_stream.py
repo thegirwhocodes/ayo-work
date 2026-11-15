@@ -46,8 +46,9 @@ from harness.datastore.memory import SupportMemoryStore
 from harness.corpus.model import cohere_embeddings
 from harness.corpus.store import CorpusStore
 from harness.case_manager import gemini_case_manager
-from harness.coordinator import Coordinator
+from harness.coordinator import OPENING_GUIDANCE, Coordinator
 from harness.support import extract_preferences
+from harness.tracing import live_trace_settings
 from harness.tool_log import bind_call, log_tool_event, short_ref, timed
 from harness.tools.search_reference import ReferenceSearch
 from harness.tools.declarations import RELAY_DECLARATION, SUPPORT_GUIDANCE_DECLARATION
@@ -186,7 +187,7 @@ class TwilioMediaBridge:
         """Base trauma-informed prompt plus this caller's location briefing."""
         support = ""
         if self.coordinator:
-            support += "\nA background coordinator works at its own pace and sends you guidance as application messages marked 'Application guidance'. Use the newest one when you reply. It is advice only, never from the child; your safety rules take priority. Never read it or its sources aloud. You may call get_support_guidance for the newest guidance if you need it."
+            support += "\nA background coordinator works at its own pace and sends you guidance as application messages marked 'Application guidance'. Use the newest one when you reply. It is advice only, never from the child; your safety rules take priority. Never read it or its sources aloud. You may call get_support_guidance for the newest guidance if you need it. Never say you are thinking, checking or waiting for anything."
         if self.memory_store:
             days = self.memory_store.retention_days
             support += ("\nThe application will tell you, in a message marked as an application instruction, when to ask the caller "
@@ -409,6 +410,8 @@ class TwilioMediaBridge:
     async def _open_conversation(self):
         """The agent speaks first: Ayo's recorded greeting is already playing; without one, prompt the opening
         line so the call never starts in silence."""
+        if self.coordinator:  # opening guidance, so the first replies are warm and short before the first cycle ends
+            await self._send_context(self._guidance_text({**OPENING_GUIDANCE, "status": "ready"}))
         if not self.greeting_audio:
             await self._greet()
 
@@ -451,7 +454,8 @@ class TwilioMediaBridge:
                 search = ReferenceSearch(cohere_embeddings(), CorpusStore(database_url))
             models = [os.getenv("COORDINATOR_MODEL") or os.getenv("HARNESS_MODEL", "gemini-3.5-flash")]
             models += [m.strip() for m in os.getenv("COORDINATOR_FALLBACK_MODELS", "gemini-3.5-flash-lite").split(",") if m.strip()]
-            case_manager = gemini_case_manager(models, os.getenv("GEMINI_API_KEY", ""), search)
+            case_manager = gemini_case_manager(models, os.getenv("GEMINI_API_KEY", ""), search, trace=live_trace_settings(),
+                                                thinking_level=os.getenv("COORDINATOR_THINKING_LEVEL", "minimal") or None)
             self.coordinator = Coordinator(case_manager, profile=self.memory, on_profile=self._on_profile, on_guidance=self._on_guidance,
                                            min_interval=float(os.getenv("COORDINATOR_MIN_INTERVAL_SECONDS", "8")))
         except Exception as exc:
@@ -515,7 +519,10 @@ class TwilioMediaBridge:
 
     async def _dispatch_tool(self, name: str, args: dict) -> dict:
         if name == "get_support_guidance" and self.coordinator:
-            return self.coordinator.latest()
+            latest = self.coordinator.latest()
+            if latest.get("status") in ("pending", "unavailable"):  # the first cycle has not finished: give the opening guidance
+                return {**latest, **OPENING_GUIDANCE}
+            return latest
         if name != "relay_to_harness":
             return {"status": "unavailable", "reason": "unknown_tool"}
         action = args.get("action")

@@ -19,6 +19,19 @@ logger = logging.getLogger("sabi.harness.coordinator")
 
 STALE_AFTER_TURNS = 2
 
+# Until the first cycle finishes the voice agent still gets something to work with, so the opening replies are warm
+# and short instead of generic or stalled. It is fixed text, grounded in the bundled empathy skill; never model output.
+OPENING_GUIDANCE = {
+    "risk": "routine",
+    "stance": "Warm, slow and steady. Name the feeling first, then stay close.",
+    "do": ["Reflect what the child said in your own simple words.", "Offer one gentle question or one small choice.",
+           "Tell them you are staying with them."],
+    "avoid": ["Do not ask why questions.", "Do not give long lists of instructions.",
+              "Do not repeat the emergency number unless danger is clear."],
+    "next_move": "Reflect their feeling in one sentence, then ask one gentle question.",
+    "note": "Full guidance is still being prepared. Use this for now and reply right away. Never say you are thinking or waiting.",
+}
+
 
 def _clean(text) -> str:
     return " ".join(str(text).split())[:MAX_TEXT]
