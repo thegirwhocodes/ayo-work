@@ -6,6 +6,49 @@ A clean, modular rebuild of the **Sabi full-duplex telephony voice stack**, purp
 
 This repository contains the full production telephony architecture of Sabi—free of educational curricula—paired with clinical psychological principles (Psychological First Aid, NICHD Child Forensic Interview Protocol) and low-latency bidirectional voice AI.
 
+## 🎯 Who it is for and why
+
+**Target user:** a child or teenager, often with only a basic phone and no internet, who is scared, hurt or unsure who to tell. They call a free number and talk to a calm voice. **Second user:** the emergency responder or safeguarding contact who is brought in, with the child's agreement, when the child needs help beyond the call.
+
+**The problem:** children in danger rarely write to a chatbot; they call, and many never reach anyone. A voice agent must answer at once, stay gentle, never interrogate or promise secrecy, and still be able to get a human involved honestly.
+
+**How it works, in short:** a fast voice agent talks to the child and never waits on slower reasoning. In the background, Deep Agents do the careful work: a case manager advises on every turn, and an emergency agent plans and runs the escalation once the child agrees.
+
+### Architecture
+
+```mermaid
+flowchart LR
+  C([Child on the phone]) <--> T[Twilio / AudioSocket]
+  T <--> B[Call bridge<br/>app/voice/twilio_stream.py]
+  B <--> V[Voice engine<br/>OpenAI Realtime + ElevenLabs<br/>or Gemini Live]
+  B -- "each finished turn,<br/>never waits" --> CM
+  subgraph DA1 [Deep Agent: case manager - harness/case_manager.py]
+    CM[Orchestrator] --> TR[triage subagent<br/>structured output]
+    CM --> RS[researcher subagent<br/>reviewed corpus]
+    CM --> AD[advisor subagent<br/>skills on demand<br/>+ rubric self-check]
+  end
+  CM -- "risk, stance, next move<br/>pulled via get_support_guidance" --> V
+  V -- "relay_to_harness,<br/>only after a clear yes" --> J[(Encrypted one-use<br/>emergency job)]
+  J --> EA
+  subgraph DA2 [Deep Agent: emergency agent - Agent Server]
+    EA[Escalation plan:<br/>text, call, backup responder,<br/>wait for acknowledgement, check-in]
+  end
+  EA -- "callback, application<br/>holds all secrets" --> B
+  B --> R([Responder: SMS / phone call])
+  B --> D[Live dashboard<br/>content-free events]
+```
+
+| Deep Agents feature | Where it is used |
+|---|---|
+| Subagents | Case manager (`triage`, `researcher`, `advisor`); emergency agent as an async subagent on the Agent Server |
+| Skills, loaded on demand | Empathy and CBT skills in `harness/skills/`, read-only route into the advisor |
+| Structured output | `Triage` and `Advice` schemas |
+| Rubric self-check | Advice is graded against a safety rubric and revised until it passes (`AdviceRubric`) |
+| Planning and async tasks | Emergency escalation ladder with check-ins and an acknowledgement window |
+| Studio and tracing | `case_manager` and `emergency` graphs in `langgraph.json`; synthetic-call tracing only |
+
+> Not yet connected: the live-call guardrail helpers in `app/safety/guardrails.py`, and inbound SMS replies (acknowledgements and location) reaching a running escalation.
+
 ---
 
 ## ⚡ Key Capabilities
@@ -66,8 +109,7 @@ For the local Compose setup, set `GEMINI_API_KEY` and `TWILIO_AUTH_TOKEN` in
 and a Postgres container with a persistent development volume. For a local
 non-Compose server, set `DATABASE_URL` to a PostgreSQL connection string.
 
-The Twilio webhook validates the request signature and passes a short-lived signed caller number to the media stream. The voice agent answers immediately and speaks first. Voice recognition happens quietly inside the conversation: the same caller audio feeds a speech collector, and once 5 seconds of detected speech are gathered a background task runs the Deep Agents harness to enroll the number's first embedding or compare it on later calls. The agent mentions once, in one natural sentence, that it will recognise the caller's voice next time. A mismatch, too little speech, a missing identity or a verification error never ends the call: it only means saved preferences are not loaded or written for that call (a voice-matched returning caller gets their consented memory back). AudioSocket calls do not carry the persistent caller number, so they have no voice recognition.
-does not provide the persistent caller number required by this flow.
+The Twilio webhook validates the request signature and passes a short-lived signed caller number to the media stream. When the stream starts, the application plays Ayo's recorded greeting (if `AYO_GREETING_AUDIO` is set) while it collects the caller's first moments of speech (up to 12 seconds). It then runs a deterministic voice check, with no language model in the path: the first call enrols the number's voice, later calls compare against it. The result is one of four identity states: `known`, `new`, `unknown` or `unsure`. Only after that does the voice engine connect, and the caller's first words are replayed to it so Ayo answers them. A mismatch, too little speech, a missing identity or a verification error never ends the call: `unsure` or `unknown` only means saved preferences are not loaded or written for that call (a voice-matched returning caller gets their consented memory back). AudioSocket calls do not carry the persistent caller number, so they have no voice recognition.
 
 `VOICE_VERIFICATION_THRESHOLD` defaults to 0.75 for demonstration only; it
 must be calibrated on representative telephone recordings before relying on
@@ -112,13 +154,7 @@ Three ways to watch the case manager and the emergency agent, none of which expo
 pytest tests
 ```
 
-Output:
-```
-tests/test_api.py ..                                                     [ 18%]
-tests/test_audio.py ....                                                 [ 54%]
-tests/test_guardrails.py .....                                           [100%]
-======================== 11 passed in 0.17s =========================
-```
+Expected: all tests pass (about 225 passed, 16 skipped at the time of writing). If your `.env` sets `TWILIO_AUTH_TOKEN`, the five webhook tests in `tests/test_caller_location.py` return 403 because signature checking is on; run them with `TWILIO_AUTH_TOKEN= pytest tests`.
 
 ---
 

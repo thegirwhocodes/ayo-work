@@ -31,11 +31,12 @@ def _clean_list(items, drop_unsafe: bool = False) -> list[str]:
 
 class Coordinator:
     def __init__(self, analyst, profile=None, on_profile=None, history_turns: int = 12,
-                 cycle_timeout: float = 90.0, min_interval: float = 0.0):
+                 cycle_timeout: float = 90.0, min_interval: float = 0.0, on_guidance=None):
         # analyst: async (transcript, profile) -> CaseAnalysis, normally harness.case_manager.CaseManager.
         self.analyst = analyst
         self._profile = sanitize_profile(profile)
         self.on_profile = on_profile
+        self.on_guidance = on_guidance  # called with each newly published guidance, so it can be pushed to the call
         self.history_turns, self.cycle_timeout = history_turns, cycle_timeout
         # Spaces cycles out so a rate-limited API key (e.g. 15 requests/minute) is not exhausted.
         self.min_interval = min_interval
@@ -135,3 +136,8 @@ class Coordinator:
             "sources": [dict(s) for s in analysis.sources], "checked": analysis.rubric,
             "note": "Background guidance only. Never read it aloud. Safety rules and emergency tools take priority.",
         }
+        if self.on_guidance:
+            try:
+                self.on_guidance(dict(self._guidance))
+            except Exception as exc:
+                logger.warning("Guidance callback failed: %s", type(exc).__name__)

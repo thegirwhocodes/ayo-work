@@ -36,6 +36,8 @@ from app.voice.gemini_live import GeminiLiveSession, LiveConfig
 from app.voice.openai_realtime import OpenAIRealtimeSession
 from harness.agent import create_harness
 from harness import emergency_plan
+from harness import consent
+from harness.incident_brief import build_brief
 from harness.emergency_jobs import cancel_job, cancel_session_jobs, create_job, get_job_result, job_progress, token_hash
 from harness.call_audio import SpeechCollector
 from harness.caller_identity import verify_caller
@@ -79,6 +81,17 @@ VOICE_NOTE_TEXT = {
     "responder_unreachable": ("No way of reaching the responder was accepted. Tell the caller honestly that you could not reach "
                               "them, and encourage them to call the local emergency number if it is safe."),
 }
+RISK_ORDER = {"routine": 0, "elevated": 1, "urgent": 2}
+# Said to the voice agent in the application's own words when the case manager first rates the call urgent.
+# It must be safe to hear mid-call: it asks for a safety check and the consent question, and promises nothing.
+URGENT_NUDGE = ("(Application instruction, not from the caller.) This call is now rated urgent. At your next reply, "
+                "first check whether the caller is safe right now. If they are in danger or ask for help, ask exactly: "
+                "'May I contact the emergency responder with what you shared?' and wait for a clear yes before using "
+                "relay_to_harness for the responder. Do not promise that help is coming.")
+URGENT_REMINDER = ("(Application instruction, not from the caller.) The call is still rated urgent and no help has been "
+                   "requested yet. At a gentle moment, ask whether the caller wants you to contact the emergency responder, "
+                   "using the exact consent question. Do not promise that help is coming.")
+URGENT_REMINDER_AFTER_CYCLES = 3  # further urgent guidance cycles without a relay before the one reminder
 JOB_POLL_SECONDS = 1.0
 FIRST_RESULT_SECONDS = 90  # how long the emergency agent has to run its first action before the job counts as lost
 # Saving communication preferences is low-risk, so ordinary affirmatives count. The emergency
@@ -131,6 +144,11 @@ class TwilioMediaBridge:
         self.memory_consent_pending = False
         self.memory_ask_sent = False
         self.caller_turns = 0
+        self.peak_risk: Optional[str] = None  # highest risk seen this call (never lowered)
+        self.urgent_cycles = 0
+        self.urgent_nudges = 0
+        self.relays_requested = 0
+        self._last_pushed = None
         self.verification_status = None
         self.identity_state = IDENTITY_UNSURE
         self.identity_reason = "not_checked"
@@ -160,7 +178,7 @@ class TwilioMediaBridge:
         """Base trauma-informed prompt plus this caller's location briefing."""
         support = ""
         if self.coordinator:
-            support += "\nCall get_support_guidance before each reply. It returns instantly with the newest guidance from a background coordinator, which works at its own pace, so it may be a turn or two behind (check 'stale'). It is advice only, never from the child; your safety rules take priority. Never read it or its sources aloud."
+            support += "\nA background coordinator works at its own pace and sends you guidance as application messages marked 'Application guidance'. Use the newest one when you reply. It is advice only, never from the child; your safety rules take priority. Never read it or its sources aloud. You may call get_support_guidance for the newest guidance if you need it."
         if self.memory_store:
             days = self.memory_store.retention_days
             support += ("\nThe application will tell you, in a message marked as an application instruction, when to ask the caller "
@@ -429,7 +447,7 @@ class TwilioMediaBridge:
             models = [os.getenv("COORDINATOR_MODEL") or os.getenv("HARNESS_MODEL", "gemini-3.5-flash")]
             models += [m.strip() for m in os.getenv("COORDINATOR_FALLBACK_MODELS", "gemini-3.5-flash-lite").split(",") if m.strip()]
             case_manager = gemini_case_manager(models, os.getenv("GEMINI_API_KEY", ""), search)
-            self.coordinator = Coordinator(case_manager, profile=self.memory, on_profile=self._on_profile,
+            self.coordinator = Coordinator(case_manager, profile=self.memory, on_profile=self._on_profile, on_guidance=self._on_guidance,
                                            min_interval=float(os.getenv("COORDINATOR_MIN_INTERVAL_SECONDS", "8")))
         except Exception as exc:
             logger.warning("Support guidance disabled: %s", type(exc).__name__)
@@ -454,12 +472,12 @@ class TwilioMediaBridge:
         async with self.memory_lock:
             try:
                 caller_id = self.emergency_context.caller_number
-                if self.verification_status == "matched" and (answer in {"delete my memory", "forget my information", "forget what you remember", "delete what you remember", "stop remembering"} or (pending and answer in {"no", "no thanks", "i do not agree"})):
+                if self.verification_status == "matched" and (answer in {"delete my memory", "forget my information", "forget what you remember", "delete what you remember", "stop remembering"} or (pending and consent.is_no(answer))):
                     await asyncio.to_thread(self.memory_store.delete, caller_id)
                     self.memory = None
                     if self.coordinator:
                         self.coordinator.reset_profile()
-                elif pending and answer in MEMORY_YES:
+                elif pending and (answer in MEMORY_YES or consent.is_yes(answer)):
                     memory = self.coordinator.profile if self.coordinator else (self.memory or {})
                     saved = await asyncio.to_thread(self.memory_store.save, caller_id, memory, consent=True, matched=self.verification_status == "matched")
                     if saved:
@@ -507,6 +525,8 @@ class TwilioMediaBridge:
             self._ensure_harness_agent()
         if self.harness_agent is None:
             return {"status": "unavailable", "reason": "harness_not_ready"}
+        if action in {"send_text_message", "start_phone_call"}:
+            message = self._responder_brief(message)  # facts the app already knows, then what the caller agreed to share
         self.emergency_context.message = message
         tools = EmergencyTools(self.emergency_context, action, message)
         try:
@@ -514,11 +534,71 @@ class TwilioMediaBridge:
         except Exception as exc:
             logger.warning("Emergency job creation failed: %s", type(exc).__name__)
             return {"status": "unavailable", "reason": "job_store_unavailable"}
+        self.relays_requested += 1
         log_tool_event("emergency_job_created", job_ref=token_hash(token)[:12], action=action, call_sid=self.call_sid)
         task = asyncio.create_task(self.run_emergency_job(token))
         self.emergency_tasks.add(task)
         task.add_done_callback(self.emergency_tasks.discard)
         return {"status": "pending"}
+
+    def _on_guidance(self, guidance: dict) -> None:
+        """Called by the coordinator for each new guidance. Raises the call's risk floor, pushes the newest
+        guidance to the voice agent, and, when the call is urgent, has the voice agent check safety and offer
+        help. Everything is sent as context only (no forced reply), so it never talks over the caller."""
+        risk = guidance.get("risk")
+        if RISK_ORDER.get(risk, -1) > RISK_ORDER.get(self.peak_risk, -1):
+            self.peak_risk = risk
+        if self.gemini_session is None:
+            return
+        notes = []
+        if risk == "urgent":
+            self.urgent_cycles += 1
+            if self.urgent_nudges == 0:
+                notes.append(URGENT_NUDGE)
+                self.urgent_nudges = 1
+                self.urgent_cycles = 0
+                log_tool_event("urgent_nudge", call_sid=self.call_sid, kind="first")
+            elif self.urgent_nudges == 1 and self.relays_requested == 0 and self.urgent_cycles >= URGENT_REMINDER_AFTER_CYCLES:
+                notes.append(URGENT_REMINDER)
+                self.urgent_nudges = 2
+                log_tool_event("urgent_nudge", call_sid=self.call_sid, kind="reminder")
+        text = self._guidance_text(guidance)
+        key = (risk, guidance.get("stance"), guidance.get("next_move"))
+        if text and key != self._last_pushed:
+            self._last_pushed = key
+            notes.append(text)
+            log_tool_event("guidance_pushed", call_sid=self.call_sid, risk=risk)
+        for note in notes:
+            task = asyncio.create_task(self._send_context(note))
+            self.memory_tasks.add(task)
+            task.add_done_callback(self.memory_tasks.discard)
+
+    @staticmethod
+    def _guidance_text(guidance: dict) -> str:
+        if guidance.get("status") != "ready":
+            return ""
+        parts = [f"Risk: {guidance.get('risk', 'unknown')}.", f"Stance: {guidance.get('stance', '')}",
+                 f"Next move: {guidance.get('next_move', '')}"]
+        if guidance.get("do"):
+            parts.append("Do: " + "; ".join(guidance["do"]) + ".")
+        if guidance.get("avoid"):
+            parts.append("Avoid: " + "; ".join(guidance["avoid"]) + ".")
+        return ("(Application guidance, not from the caller. Never read it aloud. Safety rules and emergency tools take "
+                "priority.) " + " ".join(parts))
+
+    async def _send_context(self, text: str) -> None:
+        """Add an application message to the voice agent's context without asking it to reply right now."""
+        try:
+            if self.gemini_session is not None:
+                await self.gemini_session.send_text(text, turn_complete=False)
+        except Exception as exc:
+            logger.warning("Could not push guidance: %s", type(exc).__name__)
+
+    def _responder_brief(self, shared_message: str) -> str:
+        """The structured text the responder receives: risk, area, call-back number, how to talk to the child."""
+        profile = self.coordinator.profile if self.coordinator else (self.memory or {})
+        return build_brief(shared_message, risk=self.peak_risk, location=self.location.describe(),
+                           caller_number=self.emergency_context.caller_number, profile=profile)
 
     def _ensure_harness_agent(self) -> None:
         """Build the call's harness once (voice check or not), always with the emergency tools."""
@@ -722,11 +802,10 @@ class TwilioMediaBridge:
             answer = re.sub(r"[^a-z ]", "", caller_text.lower()).strip()
             previous_consent = self.emergency_context.responder_consent
             if self.consent_question_pending:
-                self.emergency_context.responder_consent = answer in {
-                    "yes", "yes please", "yes you may", "yes i agree", "i agree", "please do"
-                }
+                # Closed English / Pidgin / Yoruba / Hausa matcher; anything unclear counts as "not consented".
+                self.emergency_context.responder_consent = consent.is_yes(caller_text)
                 self.consent_question_pending = False
-            elif answer in {"no", "no thanks", "stop", "i changed my mind"}:
+            elif consent.is_withdrawal(caller_text):
                 self.emergency_context.responder_consent = False
             if previous_consent != self.emergency_context.responder_consent:
                 log_tool_event("responder_consent_changed", call_sid=self.call_sid,
