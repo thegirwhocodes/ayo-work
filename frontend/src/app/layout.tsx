@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Ayo — A child’s best friend.",
+  title: "Ayo : Your companion",
   description:
     "A free phone line any child can call, to talk, to be heard, and to get help from a real person when something is wrong. An initiative of Education for Equality.",
 };
