@@ -64,6 +64,7 @@ VOICE_RECOGNITION_NOTE = (
 CONSENT_QUESTION = "may i contact the emergency responder with what you shared"
 RUNTIME_CONTEXT_PLACEHOLDER = "{RUNTIME_CONTEXT}"
 GREETING_MESSAGE_BYTES = 1600          # 200 ms of 8 kHz mu-law per Twilio media message
+CONSENT_WAIT_S = 3.0                   # how long a tool call waits for the caller's answer to the consent question to be recorded
 START_TIMEOUT_S = 15.0                 # how long to wait for Twilio's `start` event before giving up on the call
 
 # Voice identity states. The voice check runs quietly in the background on whatever the caller says during the
@@ -524,6 +525,8 @@ class TwilioMediaBridge:
         if not isinstance(message, str) or len(message) > 1600:
             return {"status": "unavailable", "reason": "invalid_message"}
         if action in {"send_text_message", "start_phone_call"} and not self.emergency_context.responder_consent:
+            await self._await_pending_consent()
+        if action in {"send_text_message", "start_phone_call"} and not self.emergency_context.responder_consent:
             return {"status": "consent_required"}
         if self.harness_agent is None:
             self._ensure_harness_agent()
@@ -603,6 +606,14 @@ class TwilioMediaBridge:
         profile = self.coordinator.profile if self.coordinator else (self.memory or {})
         return build_brief(shared_message, risk=self.peak_risk, location=self.location.describe(),
                            caller_number=self.emergency_context.caller_number, profile=profile)
+
+    async def _await_pending_consent(self, timeout: float = CONSENT_WAIT_S) -> None:
+        """The agent may call the tool in the same response as the caller's "yes", before that answer is transcribed
+        and recorded. If the consent question is pending, give the answer a moment to land instead of refusing."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while (self.consent_question_pending and not self.emergency_context.responder_consent
+               and asyncio.get_running_loop().time() < deadline):
+            await asyncio.sleep(0.1)
 
     def _ensure_harness_agent(self) -> None:
         """Build the call's harness once (voice check or not), always with the emergency tools."""

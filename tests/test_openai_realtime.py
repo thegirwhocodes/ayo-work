@@ -209,3 +209,4 @@ def test_connect_requires_keys(monkeypatch):
     session = OpenAIRealtimeSession(LiveConfig(system_prompt="p"), on_audio=noop, on_interrupted=noop, on_turn_complete=noop)
     with pytest.raises(LiveSetupError, match="OPENAI_API_KEY"):
         asyncio.run(session.connect())
+

@@ -166,3 +166,51 @@ def test_gemini_is_exposed_only_to_relay_and_main_harness_has_async_subagent(mon
     declarations = setup["setup"]["tools"][0]["functionDeclarations"]
     assert [tool["name"] for tool in declarations] == ["relay_to_harness"]
     assert "Never promise" in setup["setup"]["systemInstruction"]["parts"][0]["text"]
+
+
+def test_a_yes_that_arrives_with_the_tool_call_is_not_refused():
+    """The agent can call the tool in the same response as the caller's 'yes', before the answer is recorded."""
+    import asyncio
+    from app.voice.twilio_stream import TwilioMediaBridge
+
+    bridge = TwilioMediaBridge(None, "prompt")
+    bridge.consent_question_pending = True
+
+    async def go():
+        async def answer():
+            await asyncio.sleep(0.3)
+            bridge.emergency_context.responder_consent, bridge.consent_question_pending = True, False
+        task = asyncio.create_task(answer())
+        await bridge._await_pending_consent(timeout=2.0)
+        await task
+    asyncio.run(go())
+    assert bridge.emergency_context.responder_consent
+
+    refused = TwilioMediaBridge(None, "prompt")  # no question was asked: nothing to wait for, refused at once
+    started = asyncio.run(asyncio.wait_for(refused._dispatch_tool("relay_to_harness", {"action": "start_phone_call", "message": "help"}), 1))
+    assert started == {"status": "consent_required"}
+
+
+import pytest
+
+
+@pytest.mark.parametrize("answer", ["yes", "yes please", "yes you may", "yes you can", "yeah go ahead", "go ahead", "i give you my consent",
+                                    "i consent", "please do", "i agree", "yes do it", "you may"])
+def test_natural_ways_of_agreeing_count_as_consent(answer):
+    from harness.consent import is_yes
+    assert is_yes(answer)
+
+
+@pytest.mark.parametrize("answer", ["", "no", "no thanks", "yes but wait", "i dont know", "maybe", "not yet", "what",
+                                    "yes you may not", "mozhesh ne sekade"])
+def test_hedges_negations_and_unclear_answers_are_not_consent(answer):
+    from harness.consent import is_yes
+    assert not is_yes(answer)
+
+
+def test_transcription_is_pinned_to_a_language(monkeypatch):
+    from app.voice.openai_realtime import transcription_config
+    monkeypatch.delenv("OPENAI_TRANSCRIBE_LANGUAGE", raising=False)
+    assert transcription_config()["language"] == "en"
+    monkeypatch.setenv("OPENAI_TRANSCRIBE_LANGUAGE", "")
+    assert "language" not in transcription_config()
