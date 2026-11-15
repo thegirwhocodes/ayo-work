@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import replace
 from typing import Optional, Callable, Awaitable
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -31,6 +32,7 @@ from app.voice.audio import (
     Downsample24kTo8k,
     FrameChunker,
 )
+from app.location import lane as location_lane
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
 from app.voice.openai_realtime import OpenAIRealtimeSession
@@ -45,6 +47,7 @@ from harness.corpus.store import CorpusStore
 from harness.coordinator import Coordinator, GeminiStructuredLLM, load_skills_text
 from harness.support import extract_preferences
 from harness.tools.declarations import RELAY_DECLARATION, SUPPORT_GUIDANCE_DECLARATION
+from harness.tools.location import LOCATION_DECLARATIONS, LOCATION_TOOL_NAMES
 from harness.tools import EmergencyCallContext, EmergencyTools, SpeakerVerifier, VoiceVerificationTool
 from settings import get_settings
 
@@ -63,6 +66,16 @@ IDENTITY_NEW = "new"          # first call: this voice was just enrolled
 IDENTITY_UNKNOWN = "unknown"  # a different voice from the enrolled one
 IDENTITY_UNSURE = "unsure"    # could not tell (too little speech, check failed, database down)
 _IDENTITY_BY_STATUS = {"matched": IDENTITY_KNOWN, "enrolled": IDENTITY_NEW, "not_matched": IDENTITY_UNKNOWN}
+
+
+LOCATION_INSTRUCTIONS = (
+    "\nWHERE THE CHILD IS: never interrogate, and never insist. When the child tells you about danger, or asks "
+    "for help, or when they are settled and it feels natural, gently ask where they are right now. "
+    "Right before you ask, call location_link_status (silently) and follow what it returns. "
+    "As soon as they name a street, school, landmark or area, call record_caller_location with their words. "
+    "If they do not want to say, that is okay: say so, and carry on listening. "
+    "Never read a location back as if you were watching them, and never say help is on the way."
+)
 
 
 class TwilioMediaBridge:
@@ -90,6 +103,8 @@ class TwilioMediaBridge:
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
         self.location: CallerLocation = CallerLocation()
+        self.location_case_id: Optional[str] = None
+        self.public_base_url: Optional[str] = None
         self.emergency_context = EmergencyCallContext(caller_number="")
         self.consent_question_pending = False
         self.harness_agent = None
@@ -129,6 +144,35 @@ class TwilioMediaBridge:
         )
         return self.location
 
+    def _open_location_lane(self, verified_number: Optional[str]) -> None:
+        """Start location evidence for this call.
+
+        The number used for texting and for the device feed is the one from the signed caller token, never
+        the unsigned `sabi_number` parameter: the media socket is reachable by anyone, and a made-up number
+        there must not be able to make us text a stranger.
+        """
+        if self.location_case_id is not None:
+            return
+        known = replace(self.location, number=verified_number)
+        host = self.ws.headers.get("host", "") if hasattr(self.ws, "headers") else ""
+        if host and not host.startswith(("localhost", "127.")):
+            self.public_base_url = f"https://{host}"
+        case = location_lane.start_call(
+            caller_location=known, call_sid=self.call_sid, public_base_url=self.public_base_url,
+            inject=self._tell_model,
+        )
+        self.location_case_id = case.id
+        if verified_number:
+            try:
+                location_lane.start_auto_link(case.id)
+                location_lane.start_device_lookup(case.id)
+            except RuntimeError:  # no running loop (only in unit tests that call this synchronously)
+                pass
+
+    async def _tell_model(self, text: str) -> None:
+        if self.gemini_session is not None:
+            await self.gemini_session.send_text(text)
+
     def build_system_prompt(self) -> str:
         """Base trauma-informed prompt plus this caller's location briefing."""
         support = ""
@@ -143,7 +187,7 @@ class TwilioMediaBridge:
         base, briefing = self.system_prompt, build_location_briefing(self.location)
         if RUNTIME_CONTEXT_PLACEHOLDER in base:  # Ayo's prompt has a slot for the caller context
             base, briefing = base.replace(RUNTIME_CONTEXT_PLACEHOLDER, briefing.strip()), ""
-        return base + briefing + support + (
+        return base + briefing + support + LOCATION_INSTRUCTIONS + (
             "\nFor emergency actions use relay_to_harness. Before requesting a responder text, "
             "ask exactly: 'May I text the emergency responder with what you shared?' "
             "Wait for the caller's clear yes; never claim consent yourself. "
@@ -160,7 +204,7 @@ class TwilioMediaBridge:
             system_prompt=self.build_system_prompt(),
             voice=self.voice_name,
             input_rate=8000,
-            tools=[RELAY_DECLARATION] + ([SUPPORT_GUIDANCE_DECLARATION] if self.coordinator else []),
+            tools=[RELAY_DECLARATION, *LOCATION_DECLARATIONS] + ([SUPPORT_GUIDANCE_DECLARATION] if self.coordinator else []),
         )
         # VOICE_ENGINE=openai: OpenAI Realtime hears + thinks, ElevenLabs speaks (Ayo).
         # Anything else keeps the original Gemini Live engine. Both share one interface.
@@ -239,6 +283,8 @@ class TwilioMediaBridge:
             logger.error(f"Twilio bridge loop error: {e}", exc_info=True)
         finally:
             self._running = False
+            if self.location_case_id:
+                location_lane.end_call(self.location_case_id)
             for task in self.emergency_tasks:
                 task.cancel()
             if self.emergency_tasks:
@@ -284,6 +330,7 @@ class TwilioMediaBridge:
                 token = start.get("customParameters", {}).get("caller_token", "")
                 caller_id = verify_caller(token, os.getenv("TWILIO_AUTH_TOKEN", ""))
                 self.emergency_context.caller_number = caller_id
+                self._open_location_lane(caller_id)
                 self._start_greeting()
             elif event == "media" and caller_id:
                 payload = data.get("media", {}).get("payload", "")
@@ -426,6 +473,10 @@ class TwilioMediaBridge:
     async def relay_to_harness(self, name: str, args: dict) -> dict:
         if name == "get_support_guidance" and self.coordinator:
             return self.coordinator.latest()
+        if name in LOCATION_TOOL_NAMES:
+            if self.location_case_id is None:
+                return {"status": "unavailable", "reason": "location_not_ready"}
+            return await location_lane.handle_tool_call(self.location_case_id, name, args if isinstance(args, dict) else {})
         if name != "relay_to_harness" or not isinstance(args, dict):
             return {"status": "unavailable", "reason": "unknown_tool"}
         action = args.get("action")

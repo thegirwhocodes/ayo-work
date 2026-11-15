@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from app.location.routes import router as location_router
 from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
@@ -146,6 +147,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(location_router)
 
 
 @app.post("/internal/emergency-job")

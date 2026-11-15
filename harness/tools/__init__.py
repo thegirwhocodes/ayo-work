@@ -8,6 +8,7 @@ from harness.tools.emergency import (
     EmergencyCallContext, EmergencyTools, PhotonMessaging,
     request_location, send_text_message, start_phone_call,
 )
+from harness.tools.location import LOCATION_DECLARATIONS, LOCATION_TOOL_NAMES
 
 __all__ = [
     "MODEL_SOURCE",
