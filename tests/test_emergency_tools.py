@@ -40,7 +40,7 @@ def test_photon_sms_uses_project_sender_and_reports_submission(monkeypatch):
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             photon = PhotonMessaging(client)
-            context = EmergencyCallContext("+19876543210", responder_consent=True)
+            context = EmergencyCallContext("+19876543210", responder_consent=True, caller_text_consent=True)
             result = await send_text_message(context, "Help needed", photon)
             location = await request_location(context, photon)
             return result, location
@@ -59,6 +59,8 @@ def test_photon_sms_uses_project_sender_and_reports_submission(monkeypatch):
 def test_no_consent_and_photon_failure_do_not_claim_success(monkeypatch):
     context = EmergencyCallContext("+19876543210")
     assert run(send_text_message(context, "Help", PhotonMessaging())) == {"status": "consent_required"}
+    assert run(request_location(context, PhotonMessaging())) == {"status": "consent_required"}
+    context = EmergencyCallContext("+19876543210", caller_text_consent=True)
     monkeypatch.setenv("PHOTON_API_KEY", "secret")
     monkeypatch.setenv("PHOTON_PROJECT_ID", "project")
     monkeypatch.setenv("PHOTON_SENDER_ID", "sender")
@@ -86,7 +88,7 @@ def test_message_timeout_is_unknown_and_not_retried(monkeypatch):
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await request_location(EmergencyCallContext("+19876543210"), PhotonMessaging(client))
+            return await request_location(EmergencyCallContext("+19876543210", caller_text_consent=True), PhotonMessaging(client))
 
     assert run(exercise())["status"] == "unknown"
     assert sum(path.endswith("/messages") for path in attempts) == 1
@@ -145,9 +147,14 @@ def test_consent_and_relay_fail_closed(monkeypatch):
 
 
 def test_tool_is_restricted_to_requested_action():
-    tools = EmergencyTools(EmergencyCallContext("+19876543210"), "start_phone_call")
+    tools = EmergencyTools(EmergencyCallContext("+19876543210", responder_consent=True), "start_phone_call")
     assert json.loads(run(tools.request_location()))["reason"] == "action_not_requested"
     assert json.loads(run(tools.start_phone_call()))["status"] == "not_implemented"
+
+
+def test_phone_call_needs_responder_consent_in_the_tool_itself():
+    tools = EmergencyTools(EmergencyCallContext("+19876543210"), "start_phone_call")
+    assert json.loads(run(tools.start_phone_call())) == {"status": "consent_required"}
 
 
 def test_gemini_is_exposed_only_to_relay_and_main_harness_has_async_subagent(monkeypatch):

@@ -30,6 +30,7 @@ async def create_job(tools: EmergencyTools, session_id: str) -> str:
     payload = cipher.encrypt(json.dumps({
         "caller_number": tools.context.caller_number,
         "responder_consent": tools.context.responder_consent,
+        "caller_text_consent": tools.context.caller_text_consent,
         "action": tools.action,
         "message": tools.message,
     }).encode())
@@ -55,7 +56,9 @@ async def execute_job(token: str) -> dict:
         return {"status": "unavailable", "reason": "invalid_or_expired_job"}
     try:
         payload = json.loads(cipher.decrypt(bytes(row[0])))
-        context = EmergencyCallContext(payload["caller_number"], payload["responder_consent"])
+        context = EmergencyCallContext(
+            payload["caller_number"], payload["responder_consent"], payload.get("caller_text_consent", False)
+        )
         tools = EmergencyTools(context, payload["action"], payload["message"])
         await tools.run(tools.action)
         result = tools.result or {"status": "unavailable", "reason": "tool_not_called"}

@@ -5,27 +5,32 @@ Provides:
 - Full-duplex Twilio WebSocket stream (/ws/twilio) connected to Gemini Live.
 - Background Asterisk AudioSocket server (TCP port 9020) for GSM telephony.
 - Health and status endpoints.
+
+The emergency worker callback and admin routes are NOT here. They live in app/internal.py, served
+by a second listener on an unpublished port, so they are unreachable from the public internet.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hmac
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+import uvicorn
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from app.internal import internal_app
 from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
-from harness.caller_identity import sign_caller
-from harness.emergency_jobs import execute_job, purge_expired_jobs
+from harness.caller_identity import ANONYMOUS, sign_caller
+from harness.emergency_jobs import purge_expired_jobs
 from settings import get_settings
 
 logging.basicConfig(
@@ -99,13 +104,45 @@ async def maintain_emergency_jobs():
         await asyncio.sleep(300)
 
 
+class _InternalServer(uvicorn.Server):
+    """A second uvicorn listener inside this process. It must not take over signal handling from the
+    main server, so both hooks (old and new uvicorn names) are neutralised."""
+
+    def install_signal_handlers(self) -> None:
+        pass
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+async def _serve_internal(server: uvicorn.Server, host: str, port: int) -> None:
+    try:
+        await server.serve()
+    except SystemExit:  # uvicorn exits the process when it cannot bind; that must not kill the app
+        logger.error("Could not start the internal listener on %s:%s", host, port)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global audiosocket_server
     logger.info("Initializing Ayo services...")
+    settings = get_settings()
+    if not os.getenv("TWILIO_AUTH_TOKEN"):
+        logger.warning("TWILIO_AUTH_TOKEN is not set: Twilio requests are not validated and no caller token "
+                       "is issued, so the media stream will refuse every call")
     cleanup_task = None
-    if get_settings().emergency_job_encryption_key:
+    if settings.emergency_job_encryption_key:
         cleanup_task = asyncio.create_task(maintain_emergency_jobs())
+
+    # Internal-only listener (worker callback, voice-enrollment reset). Never published by Compose.
+    internal_server = internal_task = None
+    if len(settings.emergency_worker_secret) >= 32:
+        internal_server = _InternalServer(uvicorn.Config(
+            internal_app, host=settings.internal_host, port=settings.internal_port,
+            log_level="warning", access_log=False))
+        internal_task = asyncio.create_task(_serve_internal(internal_server, settings.internal_host, settings.internal_port))
+        logger.info("Internal listener on %s:%s", settings.internal_host, settings.internal_port)
 
     # Start Asterisk AudioSocket server in background if enabled
     if ENABLE_AUDIOSOCKET:
@@ -122,6 +159,9 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Ayo services...")
+    if internal_server is not None:
+        internal_server.should_exit = True
+        await asyncio.wait_for(asyncio.gather(internal_task, return_exceptions=True), timeout=5)
     if cleanup_task:
         cleanup_task.cancel()
         await asyncio.gather(cleanup_task, return_exceptions=True)
@@ -146,24 +186,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.post("/internal/emergency-job")
-async def emergency_job(request: Request):
-    """Consume a one-use job capability from an authenticated agent worker."""
-    secret = get_settings().emergency_worker_secret
-    supplied = request.headers.get("X-Emergency-Worker-Key", "")
-    if len(secret) < 32 or not hmac.compare_digest(supplied, secret):
-        return Response(status_code=403)
-    body = await request.json()
-    token = body.get("token") if isinstance(body, dict) else None
-    if not isinstance(token, str) or len(token) != 43:
-        return Response(status_code=400)
-    try:
-        return await execute_job(token)
-    except Exception as exc:
-        logger.warning("Emergency job store unavailable: %s", type(exc).__name__)
-        return Response(status_code=503)
 
 
 @app.get("/health")
@@ -237,15 +259,18 @@ async def voice_incoming(request: Request):
     caller = params.get("From", "")
     secret = os.getenv("TWILIO_AUTH_TOKEN", "")
     parameter = ""
-    if caller and secret:
+    if secret:
         from twilio.request_validator import RequestValidator
 
+        # Every request is validated, even one with no usable From.
         if not RequestValidator(secret).validate(str(request.url), raw_params if request.method == "POST" else {}, request.headers.get("X-Twilio-Signature", "")):
             return Response(status_code=403)
         try:
             token = sign_caller(caller, secret)
         except ValueError:
-            return Response(status_code=400)
+            # Withheld, blocked or non-E.164 caller ID: still let the child through. The token is signed
+            # but carries no number, so the stream is still provably one this webhook admitted.
+            token = sign_caller(ANONYMOUS, secret)
         parameter = f'<Parameter name="caller_token" value={quoteattr(token)} />'
 
     location = from_twilio_webhook(params)

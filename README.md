@@ -62,17 +62,39 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 For the local Compose setup, set `GEMINI_API_KEY` and `TWILIO_AUTH_TOKEN` in
-`.env`, then run `docker compose --profile dev up --build`. This starts the app
-and a Postgres container with a persistent development volume. For a local
+`.env`, then run `docker compose up --build`. That starts **only the app** (voice, location,
+and in-call emergency texting sent directly by the app). Optional parts sit behind profiles,
+so none of them can stop the app from starting (Compose 2.20+ for the optional `depends_on`):
+
+| Profile | Adds | Also needs |
+|---|---|---|
+| `dev` | a local pgvector Postgres (voice ID, memory, job store) | set `DATABASE_URL` if you use your own |
+| `emergency` | the Agent Server path for emergency texts | `EMERGENCY_DISPATCH=auto`, the worker/auth secrets, its own Postgres, a LangSmith key/licence |
+| `support` | schema + corpus sync for the support-guidance coordinator | Postgres with pgvector, `COHERE_API_KEY` |
+
+For example: `docker compose --profile dev --profile emergency up --build`. For a local
 non-Compose server, set `DATABASE_URL` to a PostgreSQL connection string.
 
-The Twilio webhook validates the request signature and passes a short-lived
-signed caller number to the media stream. At call start, the service collects
-five seconds of detected speech (up to 30 seconds), then uses the Deep Agents
-harness to enroll the first embedding for that number or compare subsequent
-calls. A failed match, insufficient speech, missing identity, or verification
-error ends the call. AudioSocket calls currently end because that protocol
-does not provide the persistent caller number required by this flow.
+The worker callback and the voice-enrollment reset are **not** on the public port 8000. They are
+served by a second listener (`INTERNAL_PORT`, default 8001) that Compose never publishes and that
+binds to `127.0.0.1` unless `INTERNAL_HOST` says otherwise. Do not expose it. The routes also require
+`EMERGENCY_WORKER_SECRET`.
+
+The Twilio webhook validates every request signature and passes a short-lived signed caller
+token to the media stream (a caller whose number is withheld gets a signed token with no number).
+Ayo's recorded greeting plays at once. Meanwhile the service collects five seconds of detected
+speech, then uses the Deep Agents harness to enroll the first embedding for that number or compare
+later calls. **The voice check never ends a call.** A mismatch, too little speech, a database or
+model failure, or a withheld number only sets the caller's identity state (`known`, `new`,
+`unknown`, `unsure`), which controls whether saved preferences are used. Only a forged caller token
+or a hang-up before the stream starts closes the call. A repeated Twilio `start` event is ignored:
+the first one fixes the call's identity and the voice engine is never reconnected without a check.
+AudioSocket calls currently end because that protocol does not provide the persistent caller number
+required by this flow.
+
+A caller can ask Ayo to "forget my voice" (honoured when their voice was recognised). An operator
+can reset any number with `DELETE /internal/voice-enrollment` on the internal listener, body
+`{"caller_id": "+E164"}`, header `X-Emergency-Worker-Key`.
 
 `VOICE_VERIFICATION_THRESHOLD` defaults to 0.75 for demonstration only; it
 must be calibrated on representative telephone recordings before relying on
@@ -89,13 +111,24 @@ so these skills do not yet guide the caller-facing voice agent.
 
 Emergency SMS uses Photon 2.0. Set `PHOTON_API_KEY`, `PHOTON_PROJECT_ID`,
 `PHOTON_SENDER_ID` (a project-owned SMS agent User ID), and
-`EMERGENCY_RESPONDER_NUMBER` (E.164). A responder text requires the caller's
-clear agreement to the agent's permission question. The location request texts
-the caller, but inbound SMS replies are not processed. Photon acceptance is not
-proof of delivery, and outbound calls are not implemented. The consent check is
-conservative and depends on speech transcription; unclear answers require the
-caller to repeat their agreement. Confirm that the configured recipient can
-actually receive and act on SMS before relying on this integration.
+`EMERGENCY_RESPONDER_NUMBER` (E.164). **Every emergency action needs the caller's own clear yes**,
+enforced in code (and again inside the tool):
+
+* responder text or phone call: "May I text the emergency responder with what you shared?"
+* location text to the caller's own phone: "May I text your phone to ask where you are?"
+
+Consent is per action, **single use** (one yes covers one send), and **expires after 3 minutes**;
+a "no" or "stop" withdraws it and cancels anything still queued. The location request texts the
+caller, but inbound SMS replies are not processed. Photon acceptance is not proof of delivery, and
+outbound calls are not implemented. The consent check depends on speech transcription and is
+conservative: anything other than a clear yes after the question counts as no.
+
+The harness model is only a courier. With `EMERGENCY_DISPATCH=auto`, an approved job goes through
+the model and the Agent Server, but if the job store, the model or the Agent Server is down or slow
+(8 s to hand over, 10 s for a result) the app sends the job itself. The job claim is atomic, so
+the fallback cannot send twice. With `direct` (the Compose default) the app always sends it itself.
+Confirm that the configured recipient can actually receive and act on SMS before relying on this
+integration.
 
 ---
 

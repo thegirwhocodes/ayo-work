@@ -8,8 +8,13 @@ import re
 import time
 
 
+# A caller whose number is withheld, blocked or not in E.164 form still gets a signed token, so the
+# stream is provably one our Twilio webhook admitted. It carries no phone number.
+ANONYMOUS = "anonymous"
+
+
 def sign_caller(caller_id: str, secret: str) -> str:
-    if not re.fullmatch(r"\+[1-9][0-9]{6,14}", caller_id) or not secret:
+    if (caller_id != ANONYMOUS and not re.fullmatch(r"\+[1-9][0-9]{6,14}", caller_id)) or not secret:
         raise ValueError("caller identity and signing secret are required")
     payload = base64.urlsafe_b64encode(f"{int(time.time())}:{caller_id}".encode()).decode()
     signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()

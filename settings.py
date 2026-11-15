@@ -31,6 +31,12 @@ class Settings:
     emergency_worker_secret: str = field(repr=False)
     agent_server_auth_secret: str = field(repr=False)
     emergency_job_encryption_key: str = field(repr=False)
+    # "auto": send emergency actions through the Agent Server and fall back to sending directly from
+    # the app if it does not answer. "direct": never use the Agent Server.
+    emergency_dispatch: str
+    # The internal listener serves only the worker callback and admin routes. It is never published.
+    internal_host: str
+    internal_port: int
     voice_engine: str
     openai_api_key: str = field(repr=False)
     openai_realtime_model: str
@@ -68,10 +74,13 @@ def get_settings() -> Settings:
         photon_sender_id=value("PHOTON_SENDER_ID"),
         emergency_responder_number=value("EMERGENCY_RESPONDER_NUMBER"),
         agent_server_url=value("AGENT_SERVER_URL", "http://127.0.0.1:2024"),
-        emergency_callback_url=value("EMERGENCY_CALLBACK_URL", "http://127.0.0.1:8000/internal/emergency-job"),
+        emergency_callback_url=value("EMERGENCY_CALLBACK_URL", "http://127.0.0.1:8001/internal/emergency-job"),
         emergency_worker_secret=value("EMERGENCY_WORKER_SECRET"),
         agent_server_auth_secret=value("AGENT_SERVER_AUTH_SECRET"),
         emergency_job_encryption_key=value("EMERGENCY_JOB_ENCRYPTION_KEY"),
+        emergency_dispatch=value("EMERGENCY_DISPATCH", "auto").strip().lower(),
+        internal_host=value("INTERNAL_HOST", "127.0.0.1"),
+        internal_port=int(value("INTERNAL_PORT", "8001")),
         voice_engine=value("VOICE_ENGINE", "gemini").strip().lower(),
         openai_api_key=value("OPENAI_API_KEY"),
         openai_realtime_model=value("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),

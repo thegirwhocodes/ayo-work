@@ -9,6 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.voice.twilio_stream import TwilioMediaBridge
+from app.internal import internal_app
 from app.main import app
 from fastapi.testclient import TestClient
 from harness.emergency_jobs import cancel_job, cancel_session_jobs, create_job, execute_job, get_job_result, token_hash
@@ -35,7 +36,7 @@ def job_database(monkeypatch):
 def test_job_is_encrypted_and_one_use_across_connections(job_database):
     async def exercise():
         session = str(uuid.uuid4())
-        token = await create_job(EmergencyTools(EmergencyCallContext("+12345678901"), "start_phone_call"), session)
+        token = await create_job(EmergencyTools(EmergencyCallContext("+12345678901", responder_consent=True), "start_phone_call"), session)
         with psycopg.connect(job_database) as connection:
             row = connection.execute("SELECT token_hash,payload FROM emergency_jobs WHERE token_hash=%s", (token_hash(token),)).fetchone()
         assert token not in row[0] and b"+12345678901" not in bytes(row[1])
@@ -43,6 +44,17 @@ def test_job_is_encrypted_and_one_use_across_connections(job_database):
         assert sorted(item["status"] for item in results) == ["finished", "unavailable"]
         assert await get_job_result(token) == {"status": "not_implemented"}
         assert await get_job_result(token) is None
+    asyncio.run(exercise())
+
+
+def test_job_without_consent_is_refused_when_executed(job_database):
+    async def exercise():
+        token = await create_job(EmergencyTools(EmergencyCallContext("+12345678901"), "start_phone_call"), str(uuid.uuid4()))
+        assert (await execute_job(token))["status"] == "finished"
+        assert await get_job_result(token) == {"status": "consent_required"}
+        location = await create_job(EmergencyTools(EmergencyCallContext("+12345678901", caller_text_consent=True), "request_location"), str(uuid.uuid4()))
+        with psycopg.connect(job_database) as connection:
+            assert connection.execute("SELECT count(*) FROM emergency_jobs WHERE token_hash=%s", (token_hash(location),)).fetchone()[0] == 1
     asyncio.run(exercise())
 
 
@@ -82,13 +94,24 @@ def test_worker_callback_requires_shared_secret(monkeypatch):
     async def execute(token):
         return {"status": "finished"}
 
-    monkeypatch.setattr("app.main.execute_job", execute)
-    client = TestClient(app)
+    monkeypatch.setattr("app.internal.execute_job", execute)
+    client = TestClient(internal_app)
     try:
         assert client.post("/internal/emergency-job", json={"token": "x" * 43}).status_code == 403
+        assert client.post("/internal/emergency-job", json={"token": "x" * 43},
+                           headers={"X-Emergency-Worker-Key": "wrong"}).status_code == 403
+        # a non-ASCII header must be a clean 403, not a server error
+        assert client.post("/internal/emergency-job", json={"token": "x" * 43},
+                           headers={"X-Emergency-Worker-Key": "caf\u00e9".encode("latin-1")}).status_code == 403
+        assert client.post("/internal/emergency-job", json={"token": "short"},
+                           headers={"X-Emergency-Worker-Key": secret}).status_code == 400
         response = client.post("/internal/emergency-job", json={"token": "x" * 43},
                                headers={"X-Emergency-Worker-Key": secret})
         assert response.json() == {"status": "finished"}
+        # the public app (the one Twilio and the internet reach) does not serve it at all
+        public = TestClient(app)
+        assert public.post("/internal/emergency-job", json={"token": "x" * 43},
+                           headers={"X-Emergency-Worker-Key": secret}).status_code == 404
     finally:
         get_settings.cache_clear()
 
@@ -108,6 +131,8 @@ def test_relay_returns_while_harness_is_still_running(monkeypatch):
                 await release.wait()
         bridge = TwilioMediaBridge(object(), "prompt")
         bridge.harness_agent = Agent()
+        await bridge._on_turn_complete("", "May I text the emergency responder with what you shared?")
+        await bridge._on_turn_complete("Yes please", "Okay.")
         assert await bridge.relay_to_harness("relay_to_harness", {"action": "start_phone_call"}) == {"status": "pending"}
         assert len(bridge.emergency_tasks) == 1
         for task in bridge.emergency_tasks:

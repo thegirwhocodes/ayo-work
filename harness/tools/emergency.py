@@ -14,7 +14,10 @@ from settings import get_settings
 @dataclass
 class EmergencyCallContext:
     caller_number: str
+    # Caller agreed to share what they said with the responder (text or call).
     responder_consent: bool = False
+    # Caller agreed to receive a text on their own phone asking where they are.
+    caller_text_consent: bool = False
 
 
 class PhotonMessaging:
@@ -77,13 +80,20 @@ async def send_text_message(context: EmergencyCallContext, text: str, photon: Ph
 
 
 async def request_location(context: EmergencyCallContext, photon: PhotonMessaging) -> dict:
-    """Ask the caller by SMS to reply with their location."""
+    """Ask the caller by SMS to reply with their location, only after they agree to a text."""
+    if not context.caller_text_consent:
+        return {"status": "consent_required"}
     result = await photon.send(context.caller_number, "If it is safe to do so, please reply with your location or address. You can also tell us on the call.")
     return {**result, "voice_instruction": "Ask whether the caller wants someone to come get them. Do not promise that help has been dispatched or will arrive."}
 
 
-async def start_phone_call() -> dict:
-    """Placeholder for the future outbound voice architecture."""
+async def start_phone_call(context: EmergencyCallContext | None = None) -> dict:
+    """Placeholder for the future outbound voice architecture.
+
+    Calling a responder shares the caller's situation, so it needs the same consent as a responder text.
+    """
+    if context is not None and not context.responder_consent:
+        return {"status": "consent_required"}
     return {"status": "not_implemented"}
 
 
@@ -121,5 +131,5 @@ class EmergencyTools:
                 elif action == "request_location":
                     self.result = await request_location(self.context, self.photon)
                 else:
-                    self.result = await start_phone_call()
+                    self.result = await start_phone_call(self.context)
             return json.dumps(self.result)

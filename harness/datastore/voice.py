@@ -34,6 +34,14 @@ class PostgresVoiceStore:
             raise ValueError("enrollment uses a different embedding model")
         return row[1]
 
+    def delete(self, caller_id: str) -> bool:
+        """Forget this caller's voiceprint so the next call enrolls afresh. True if one existed."""
+        with psycopg.connect(self.database_url) as connection:
+            result = connection.execute(
+                "DELETE FROM voice_enrollments WHERE caller_id = %s RETURNING caller_id", (caller_id,),
+            ).fetchone()
+        return result is not None
+
     def enroll(self, caller_id: str, embedding: list[float]) -> bool:
         with psycopg.connect(self.database_url) as connection:
             result = connection.execute(

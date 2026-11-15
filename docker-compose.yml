@@ -1,3 +1,9 @@
+# `docker compose up` starts only the app: voice, location and in-call emergency texting (sent directly
+# by the app). Everything optional is behind a profile, so nothing optional can stop the app starting:
+#   --profile dev        a local pgvector Postgres (voice ID, memory, job store)
+#   --profile emergency  the Agent Server path for emergency texts (needs Redis, its own Postgres and a
+#                        LangSmith key/licence); also set EMERGENCY_DISPATCH=auto
+#   --profile support    schema + corpus sync for the support-guidance coordinator
 services:
   sabi-safe:
     build: .
@@ -34,21 +40,32 @@ services:
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
       - VOICE_VERIFICATION_THRESHOLD=${VOICE_VERIFICATION_THRESHOLD:-0.75}
       - AGENT_SERVER_URL=http://agent-server:8000
+      # direct = the app sends emergency texts itself. auto = via the Agent Server (profile "emergency"),
+      # falling back to a direct send if it is slow or down.
+      - EMERGENCY_DISPATCH=${EMERGENCY_DISPATCH:-direct}
+      # Internal-only listener (worker callback, voice reset). Bound for other containers, never published.
+      - INTERNAL_HOST=0.0.0.0
+      - INTERNAL_PORT=8001
       - EMERGENCY_JOB_ENCRYPTION_KEY=${EMERGENCY_JOB_ENCRYPTION_KEY:-}
       - EMERGENCY_WORKER_SECRET=${EMERGENCY_WORKER_SECRET:-}
       - AGENT_SERVER_AUTH_SECRET=${AGENT_SERVER_AUTH_SECRET:-}
       - LANGSMITH_TRACING=false
+    # Each dependency is optional: it is only waited for when its profile is active.
     depends_on:
       emergency-migrate:
         condition: service_completed_successfully
+        required: false
       support-init:
         condition: service_completed_successfully
+        required: false
       agent-server:
         condition: service_healthy
+        required: false
       postgres:
         condition: service_healthy
         required: false
   emergency-migrate:
+    profiles: [emergency]
     build: .
     command: ["python", "-m", "scripts.migrate_emergency"]
     environment:
@@ -65,6 +82,7 @@ services:
   # Applies the support schema, then re-chunks/re-embeds corpus sources whose
   # content digest changed. Unchanged sources are skipped.
   support-init:
+    profiles: [support]
     build: .
     command: ["python", "-m", "scripts.sync_support"]
     environment:
@@ -77,6 +95,7 @@ services:
     restart: "no"
 
   agent-server:
+    profiles: [emergency]
     build:
       context: .
       dockerfile: Dockerfile.agent-server
@@ -88,7 +107,8 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGGRAPH_CLOUD_LICENSE_KEY: ${LANGGRAPH_CLOUD_LICENSE_KEY:-}
       LANGSMITH_TRACING: "false"
-      EMERGENCY_CALLBACK_URL: http://sabi-safe:8000/internal/emergency-job
+      # The app's internal listener (never the public port 8000).
+      EMERGENCY_CALLBACK_URL: http://sabi-safe:8001/internal/emergency-job
       EMERGENCY_WORKER_SECRET: ${EMERGENCY_WORKER_SECRET:-}
       AGENT_SERVER_AUTH_SECRET: ${AGENT_SERVER_AUTH_SECRET:-}
     depends_on:
@@ -102,6 +122,7 @@ services:
       start_period: 30s
 
   agent-redis:
+    profiles: [emergency]
     image: redis:7-alpine
     restart: unless-stopped
     networks: [agent-backend]

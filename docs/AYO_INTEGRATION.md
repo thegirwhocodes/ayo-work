@@ -2,6 +2,13 @@
 
 *Branch `ayo-integration` from `origin/main` @ `26b1048` (PR #8). Written Nov 14 2026.*
 
+> **Status update (branch `fix/harness-findings`).** Several risks listed below have since been addressed:
+> the voice check never hangs up (see the status section below), a repeated Twilio `start` event is ignored,
+> withheld numbers get a signed number-less token instead of a 400, every emergency action needs its own
+> single-use, expiring consent, the worker callback moved to an internal-only port, a harness-model or Agent
+> Server outage falls back to a direct send, and Compose starts the app alone (`--profile emergency` adds the
+> rest). See `docs/ASYNC_EMERGENCY_AGENT.md` and the README.
+
 ## Status (Nov 14 2026)
 
 **Built and tested (107 passed, 3 skipped):**

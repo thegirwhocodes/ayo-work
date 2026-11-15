@@ -74,6 +74,10 @@ class VoiceStore(Protocol):
         """Store only if absent; return whether this call enrolled it."""
         ...
 
+    def delete(self, caller_id: str) -> bool:
+        """Forget a stored voiceprint (reset); return whether one existed."""
+        ...
+
 
 @dataclass(frozen=True)
 class VoiceVerificationResult:
