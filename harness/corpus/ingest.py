@@ -57,6 +57,22 @@ def draft_source_from_markdown(path, metadata):
     return {**metadata, "review_status": "pending", "rights_verified": False, "sections": sections_from_markdown(path)}
 
 
+def source_digest(source):
+    """Digest of the content plus the pipeline signature that turns it into vectors."""
+    canonical = json.dumps(source["sections"], sort_keys=True, ensure_ascii=False)
+    return digest(PIPELINE + "\n" + canonical)
+
+
+def is_current(connection, source):
+    """True when this exact content is already approved and embedded (nothing to do)."""
+    with connection.cursor() as cur:
+        cur.execute("""SELECT s.content_hash, s.review_status,
+            (SELECT count(*) FROM corpus_chunks c WHERE c.source_id = s.id AND c.review_status='approved')
+            FROM corpus_sources s WHERE s.url=%s AND s.version=%s""", (source["url"], source["version"]))
+        existing = cur.fetchone()
+    return bool(existing and existing[0] == source_digest(source) and existing[1] == "approved" and existing[2] > 0)
+
+
 def ingest_source(connection, source, embeddings):
     """Prepare embeddings before opening a transaction; publish one complete version."""
     required = ("title", "publisher", "url", "version", "license", "sections")
@@ -64,15 +80,8 @@ def ingest_source(connection, source, embeddings):
         raise ValueError("source metadata and sections are required")
     if source.get("review_status") != "approved" or not source.get("rights_verified"):
         raise ValueError("source review and rights verification are required")
-    canonical = json.dumps(source["sections"], sort_keys=True, ensure_ascii=False)
-    source_hash = digest(PIPELINE + "\n" + canonical)
-    with connection.cursor() as cur:
-        cur.execute("""SELECT s.content_hash, s.review_status,
-            (SELECT count(*) FROM corpus_chunks c WHERE c.source_id = s.id AND c.review_status='approved')
-            FROM corpus_sources s WHERE s.url=%s AND s.version=%s""", (source["url"], source["version"]))
-        existing = cur.fetchone()
-    # Unchanged content with its chunks intact: skip chunking and embedding entirely.
-    if existing and existing[0] == source_hash and existing[1] == "approved" and existing[2] > 0:
+    source_hash = source_digest(source)
+    if is_current(connection, source):
         return 0
     chunks = split_sections(source["sections"], embeddings)
     if not chunks:

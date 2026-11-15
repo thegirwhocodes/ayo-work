@@ -48,15 +48,20 @@ def run_check(monkeypatch, events, *, collector_done=True, result="matched", sto
             if store_fails:
                 raise ConnectionError("no database")
 
-    class Agent:
-        def __init__(self, tool): self.tool = tool
+    class Verifier:
+        def __init__(self, store, threshold): pass
 
-        async def ainvoke(self, messages, config=None):
-            if result:
-                self.tool.result = VoiceVerificationResult(result, 0.9)
+        def verify(self, caller_id, audio):
+            if result is None:
+                raise RuntimeError("extractor failed")
+            return VoiceVerificationResult(result, 0.9)
+
+    class Agent:
+        def __init__(self, tool, emergency_context=None): self.tool, self.emergency_context = tool, emergency_context
 
     monkeypatch.setattr(twilio_stream, "SpeechCollector", Collector)
     monkeypatch.setattr(twilio_stream, "PostgresVoiceStore", Store)
+    monkeypatch.setattr(twilio_stream, "SpeakerVerifier", Verifier)
     monkeypatch.setattr(twilio_stream, "create_harness", Agent)
     if timeout is not None:
         monkeypatch.setattr(twilio_stream, "VERIFICATION_TIMEOUT_S", timeout)
@@ -88,9 +93,9 @@ def test_database_down_is_unsure_not_a_hangup(monkeypatch):
     assert bridge.identity_state == "unsure" and bridge.identity_reason == "check_failed:ConnectionError"
 
 
-def test_tool_never_called_is_unsure(monkeypatch):
+def test_verifier_failure_is_unsure(monkeypatch):
     bridge = run_check(monkeypatch, [start(), media()], result=None)
-    assert bridge.identity_state == "unsure" and bridge.identity_reason == "verification_tool_not_called"
+    assert bridge.identity_state == "unsure" and bridge.identity_reason == "check_failed:RuntimeError"
 
 
 def test_forged_caller_token_is_still_fatal(monkeypatch):
@@ -110,3 +115,4 @@ def test_emergency_agent_is_built_on_demand_when_the_check_was_skipped(monkeypat
     assert bridge.harness_agent is None
     bridge._ensure_harness_agent()
     assert bridge.harness_agent is not None
+    assert bridge.harness_agent.emergency_context is bridge.emergency_context  # always carries the emergency tools

@@ -7,5 +7,6 @@
   version 1.1.0; its MIT license is included in the skill directory.
 
 These are third-party instructions, not a substitute for clinical review or
-the application's safety handling. They are currently available to the voice
-verification harness, not the separate Gemini Live conversation.
+the application's safety handling. The case manager's advisor reads them on
+demand to write guidance for the Gemini Live conversation; Gemini Live itself
+does not load them.

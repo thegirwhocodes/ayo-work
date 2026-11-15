@@ -1,5 +1,4 @@
 from harness.corpus import ingest
-from harness.corpus.model import LazyEmbeddings
 from harness.corpus.sync import load_sources, sync_corpus
 
 
@@ -15,26 +14,24 @@ class Connection:
     def cursor(self): return Cursor(self.log)
 
 
-def test_lazy_embeddings_do_not_need_a_key_until_used():
-    def factory():
-        raise AssertionError("must not be built when nothing is embedded")
-    LazyEmbeddings(factory)  # constructing is free
-    built = []
-    class Inner:
-        def embed_query(self, t): return [1.0]
-    lazy = LazyEmbeddings(lambda: built.append(1) or Inner())
-    lazy.embed_query("a"); lazy.embed_query("b")
-    assert built == [1]
+def _manifest(tmp_path, **flags):
+    import json
+    (tmp_path / "s.md").write_text("## handbook page 1, PDF page 9\nA section.\n")
+    entry = {"title": "T", "publisher": "P", "url": "u", "version": "1", "license": "L", "markdown": "s.md", **flags}
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps([entry]))
+    return path
 
 
-def test_manifest_loads_sections_and_ships_unapproved():
-    sources = load_sources()
-    assert sources[0]["review_status"] == "pending" and sources[0]["rights_verified"] is False
-    assert len(sources[0]["sections"]) > 50 and "markdown" not in sources[0]
+def test_manifest_loads_sections_from_markdown(tmp_path):
+    sources = load_sources(_manifest(tmp_path, review_status="pending", rights_verified=False))
+    assert sources[0]["sections"][0]["page"] == "p. 1 (PDF 9)" and "markdown" not in sources[0]
+    assert len(load_sources()[0]["sections"]) > 50  # the shipped manifest resolves
 
 
-def test_unapproved_source_is_skipped_without_embedding():
-    result = sync_corpus(Connection(), embeddings=None)
+def test_unapproved_source_is_skipped_without_embedding(tmp_path):
+    manifest = _manifest(tmp_path, review_status="pending", rights_verified=False)
+    result = sync_corpus(Connection(), make_embeddings=lambda: 1 / 0, manifest=manifest)
     assert result[0][1] == "skipped: not approved"
 
 

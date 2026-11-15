@@ -5,8 +5,11 @@ WORKDIR /app
 COPY settings.py /app/settings.py
 COPY harness/__init__.py /app/harness/__init__.py
 COPY harness/emergency_subagent.py /app/harness/emergency_subagent.py
+COPY harness/emergency_plan.py /app/harness/emergency_plan.py
+COPY harness/tool_log.py /app/harness/tool_log.py
+COPY harness/tools /app/harness/tools
 COPY harness/agent_auth.py /app/harness/agent_auth.py
-RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt python-dotenv httpx
+RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt python-dotenv httpx "langchain-google-genai>=4,<5" "deepagents>=0.7.38,<0.8"
 
 ENV PYTHONPATH=/app
 ENV LANGSERVE_GRAPHS='{"emergency":"/app/harness/emergency_subagent.py:graph"}'

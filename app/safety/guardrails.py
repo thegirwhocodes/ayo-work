@@ -96,7 +96,7 @@ def guard_input(text: str) -> GuardResult:
     if not text or not text.strip():
         return GuardResult(allowed=True)
 
-    text_lower = text.lower()
+    text_lower = text.replace("\u2019", "'").lower()
 
     # 1. Immediate danger
     if IMMEDIATE_DANGER_PATTERN.search(text_lower):
@@ -148,7 +148,7 @@ def guard_output(text: str) -> str:
     if not text:
         return ""
 
-    sanitized = text
+    sanitized = text.replace("\u2019", "'")
 
     # Remove harmful interrogation patterns ("Why did you let him...", "What were you wearing...")
     interrogation_patterns = [
@@ -161,3 +161,53 @@ def guard_output(text: str) -> str:
         sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
 
     return sanitized.strip()
+
+
+# --- Live-call use -----------------------------------------------------------------------------------------
+# On a live call the model has usually already answered by the time a finished turn is checked, so a hit does
+# not replace what it says. It raises the call's risk immediately and sends the voice agent an application
+# instruction, so the safety content is deterministic even if the model or the background coordinator is slow.
+
+# Risk floor each category sets for the rest of the call. Secrecy requests are a boundary, not a danger signal.
+RISK_BY_CATEGORY = {"immediate_danger": "urgent", "self_harm": "urgent", "abuse_disclosure": "elevated"}
+# Categories that make the voice agent speak straight away; the others only shape its next reply.
+SPEAK_NOW = frozenset({"immediate_danger", "self_harm", "abuse_disclosure"})
+
+_CONSENT_OFFER = (" Then, if the caller wants outside help, ask exactly: 'May I contact the emergency responder with what you shared?' "
+                  "and wait for a clear yes before using relay_to_harness for the responder.")
+
+_GUARD_INSTRUCTIONS = {
+    "immediate_danger": (
+        "The caller may be in immediate danger. In one or two short sentences, check whether they are somewhere safe right now, "
+        "tell them to call {emergency} if they can, and say you are staying on the line." + _CONSENT_OFFER),
+    "self_harm": (
+        "The caller may be thinking about hurting themselves. In one or two short sentences, tell them their life matters and "
+        "that they do not have to carry this alone, ask whether a trusted adult is nearby, and give {helpline}, or {emergency} if "
+        "they are in danger right now." + _CONSENT_OFFER),
+    "abuse_disclosure": (
+        "The caller may have just disclosed harm. If your last reply did not already do so, in one or two short sentences tell "
+        "them it is not their fault, ask whether a trusted adult they feel safe with is nearby, and give {helpline}. Do not ask "
+        "for details, and do not suggest any adult at home is safe unless the caller named them as safe."),
+    "secrecy": (
+        "The caller asked you to keep a secret. Be honest and warm: you cannot promise secrecy if someone is being hurt, and you "
+        "will always tell them before doing anything. Never promise to keep it secret."),
+}
+
+OUTPUT_CORRECTION = (
+    "Your last reply contained something you must never say to a child (blaming, interrogating, or promising secrecy). "
+    "In one short sentence, gently take it back, and carry on supporting them. Never ask why, and never promise secrecy.")
+
+
+def guard_instruction(category: str, emergency_number: Optional[str] = None, child_helpline: Optional[str] = None) -> str:
+    """The application instruction sent to the voice agent after a guard hit (never spoken by the application itself)."""
+    template = _GUARD_INSTRUCTIONS.get(category, "")
+    if not template:
+        return ""
+    helpline = child_helpline or f"the local child helpline (in Nigeria, Cece Yara on {CHILD_HELPLINE_NG})"
+    emergency = emergency_number or "the local emergency number"
+    return ("(Application safety instruction, not from the caller; trusted.) " + template.format(emergency=emergency, helpline=helpline))
+
+
+def output_violation(text: str) -> bool:
+    """True when guard_output would have removed something from this model reply."""
+    return bool(text) and guard_output(text) != text.replace("\u2019", "'").strip()

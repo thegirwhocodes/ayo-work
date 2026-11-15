@@ -5,9 +5,10 @@ from harness.tools.verify_voice import (
     compare_voice_features, extract_voice_features,
 )
 from harness.tools.emergency import (
-    EmergencyCallContext, EmergencyTools, PhotonMessaging,
-    request_location, send_text_message, start_phone_call,
+    EmergencyCallContext, EmergencyTools, request_location, send_text_message,
 )
+from harness.tools.photon_sms import PhotonMessaging
+from harness.tools.start_phone_call import TwilioCaller, build_briefing_twiml, start_phone_call
 
 __all__ = [
     "MODEL_SOURCE",
@@ -17,5 +18,5 @@ __all__ = [
     "compare_voice_features",
     "extract_voice_features",
     "EmergencyCallContext", "EmergencyTools", "PhotonMessaging",
-    "request_location", "send_text_message", "start_phone_call",
+    "request_location", "send_text_message", "start_phone_call", "TwilioCaller", "build_briefing_twiml",
 ]

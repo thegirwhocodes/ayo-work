@@ -24,8 +24,10 @@ from fastapi.responses import PlainTextResponse
 from app.voice.caller_location import from_twilio_webhook
 from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
+from app.dashboard import router as dashboard_router
 from harness.caller_identity import sign_caller
-from harness.emergency_jobs import execute_job, purge_expired_jobs
+from harness.tracing import disable_live_tracing
+from harness.emergency_jobs import ACTIONS, add_voice_note, finish_job, job_briefing, poll_job_events, purge_expired_jobs, run_job_action
 from settings import get_settings
 
 logging.basicConfig(
@@ -41,6 +43,9 @@ try:
     load_dotenv()
 except ImportError:  # the real environment is authoritative in containers
     pass
+
+# A trace would record a child's words. Real calls are never traced; see harness/tracing.py.
+disable_live_tracing()
 
 # Load system prompt.
 # Ayo's prompt ships in this repo (app/prompts/ayo_prompt.md). AYO_PROMPT_PATH can override it with
@@ -104,6 +109,13 @@ async def lifespan(app: FastAPI):
     global audiosocket_server
     logger.info("Initializing Ayo services...")
     cleanup_task = None
+    # Download (if absent) and load the speaker model now, so no caller waits for it.
+    try:
+        from harness.tools.verify_voice import get_speaker_model
+        await asyncio.to_thread(get_speaker_model)
+        logger.info("Speaker model ready")
+    except Exception as exc:
+        logger.error("Speaker model unavailable; voice verification will fail: %s", type(exc).__name__)
     if get_settings().emergency_job_encryption_key:
         cleanup_task = asyncio.create_task(maintain_emergency_jobs())
 
@@ -139,6 +151,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(dashboard_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -150,7 +164,7 @@ app.add_middleware(
 
 @app.post("/internal/emergency-job")
 async def emergency_job(request: Request):
-    """Consume a one-use job capability from an authenticated agent worker."""
+    """Let the emergency agent act on one job: read its briefing, run an action once, poll events, leave a note, or finish it."""
     secret = get_settings().emergency_worker_secret
     supplied = request.headers.get("X-Emergency-Worker-Key", "")
     if len(secret) < 32 or not hmac.compare_digest(supplied, secret):
@@ -159,11 +173,28 @@ async def emergency_job(request: Request):
     token = body.get("token") if isinstance(body, dict) else None
     if not isinstance(token, str) or len(token) != 43:
         return Response(status_code=400)
+    action = body.get("action")
     try:
-        return await execute_job(token)
+        if action == "briefing":
+            return await job_briefing(token)
+        if action == "finish":
+            return await finish_job(token)
+        if action == "events":
+            return await poll_job_events(token)
+        if action == "note":
+            note = body.get("note")
+            return await add_voice_note(token, note) if isinstance(note, str) else Response(status_code=400)
+        if action in ACTIONS:
+            return await run_job_action(token, action)
+        return Response(status_code=400)
     except Exception as exc:
         logger.warning("Emergency job store unavailable: %s", type(exc).__name__)
         return Response(status_code=503)
+
+
+def _speaker_model_ready() -> bool:
+    from harness.tools import verify_voice
+    return verify_voice.model is not None
 
 
 @app.get("/health")
@@ -174,6 +205,7 @@ async def health():
         "version": "1.0.0",
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
         "audiosocket_active": audiosocket_server is not None,
+        "speaker_model_ready": _speaker_model_ready(),
     }
 
 

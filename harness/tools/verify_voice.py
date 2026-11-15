@@ -4,25 +4,72 @@ from __future__ import annotations
 
 import array
 import asyncio
+import logging
 import math
+import os
+import shutil
 import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Protocol
 
+logger = logging.getLogger("sabi.harness.speaker_model")
+
 MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
+MODEL_FILES = ("hyperparams.yaml", "embedding_model.ckpt", "mean_var_norm_emb.ckpt",
+               "classifier.ckpt", "label_encoder.txt")
 model = None
 model_lock = threading.Lock()
 
 
+def speaker_model_dir() -> Path:
+    """Where the model lives on disk; mount this on a volume so it survives restarts."""
+    return Path(os.getenv("SPEAKER_MODEL_DIR") or "pretrained_models/spkrec-ecapa-voxceleb")
+
+
+def speaker_model_present(directory: Path | None = None) -> bool:
+    directory = directory or speaker_model_dir()
+    return all((directory / name).is_file() for name in MODEL_FILES)
+
+
+def ensure_speaker_model() -> Path:
+    """Download the model files only if they are not already on disk."""
+    directory = speaker_model_dir()
+    if speaker_model_present(directory):
+        _materialise_label_encoder(directory)
+        logger.info("Speaker model already downloaded at %s", directory)
+        return directory
+    logger.info("Speaker model missing; downloading %s to %s", MODEL_SOURCE, directory)
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(repo_id=MODEL_SOURCE, local_dir=str(directory), allow_patterns=list(MODEL_FILES))
+    if not speaker_model_present(directory):
+        raise RuntimeError("speaker model download incomplete")
+    _materialise_label_encoder(directory)
+    return directory
+
+
+def _materialise_label_encoder(directory: Path) -> None:
+    """SpeechBrain loads label_encoder.txt as label_encoder.ckpt. Left to itself it
+    symlinks that name into an ephemeral HF cache (dangling after a container
+    recreate, forcing a network fetch), so keep a real copy on the volume."""
+    target = directory / "label_encoder.ckpt"
+    if target.is_file() and not target.is_symlink():
+        return
+    target.unlink(missing_ok=True)
+    shutil.copyfile(directory / "label_encoder.txt", target)
+
+
 def get_speaker_model():
-    """Load the CPU model once per process, on the first request."""
+    """Load the CPU model once per process (from disk; downloads only if absent)."""
     global model
     with model_lock:
         if model is None:
             from speechbrain.inference.speaker import EncoderClassifier
 
-            model = EncoderClassifier.from_hparams(source=MODEL_SOURCE)
+            directory = ensure_speaker_model()
+            model = EncoderClassifier.from_hparams(source=str(directory), savedir=str(directory))
         return model
 
 
