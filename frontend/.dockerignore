@@ -1,0 +1,7 @@
+node_modules
+.next
+brand-archive
+tsconfig.tsbuildinfo
+*.log
+.DS_Store
+README.md
