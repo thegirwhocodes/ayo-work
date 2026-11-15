@@ -31,7 +31,7 @@ from app.voice.gemini_live import LiveConfig, LiveSetupError
 from harness.tools.openai_format import to_openai_tools
 from settings import get_settings
 
-logger = logging.getLogger("sabi.openai_realtime")
+logger = logging.getLogger("ayo.openai_realtime")
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe"
@@ -46,8 +46,14 @@ TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_
 VOICE_STYLE_NOTE = (
     "\n\nVOICE STYLE: Your words are read aloud by a separate voice. When the caller sounds upset, "
     "scared or tearful, you may begin a sentence with [softly]. If they are whispering, begin with "
-    "[whispers]. Use no other bracketed tags and never say the tag words themselves."
+    "[whispers]. These two tags are the only exception to any rule against brackets or stage "
+    "directions: the voice performs them and they are never heard as words. Use no other bracketed "
+    "tags and never say the tag words themselves."
 )
+# After Ayo finishes speaking, this much caller silence earns one gentle check-in (Ayo prototype).
+SILENCE_CHECKIN_S = 8.0
+SILENCE_NOTE = ("[LISTENER: long silence. Gently say it's okay if it's hard to talk and that you're "
+                "still here. One short sentence.]")
 _TAG_RE = re.compile(r"\[(?:softly|whispers)\]\s*", re.IGNORECASE)
 _SENTENCE_RE = re.compile(r"(.+?[.!?…])(\s+)", re.DOTALL)
 
@@ -142,6 +148,11 @@ class OpenAIRealtimeSession:
         self._response_active = False
         self._response_wanted = False
         self._pending_calls: list[dict[str, Any]] = []
+        # silence check-in
+        self._ayo_has_spoken = False
+        self._caller_speaking = False
+        self._last_caller_activity = time.monotonic()
+        self._checked_in = False
 
     # ---------------- connection ----------------
     async def connect(self, timeout: float = 12.0) -> None:
@@ -177,7 +188,8 @@ class OpenAIRealtimeSession:
         self._start_workers()
 
     def _start_workers(self) -> None:
-        self._tasks = [asyncio.create_task(self._tts_worker()), asyncio.create_task(self._turn_worker())]
+        self._tasks = [asyncio.create_task(self._tts_worker()), asyncio.create_task(self._turn_worker()),
+                       asyncio.create_task(self._silence_worker())]
 
     async def _send(self, payload: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -230,8 +242,13 @@ class OpenAIRealtimeSession:
     async def _handle(self, event: dict[str, Any]) -> None:
         kind = event.get("type", "")
         if kind == "input_audio_buffer.speech_started":
+            self._caller_speaking, self._checked_in = True, False
+            self._last_caller_activity = time.monotonic()
             if self._is_speaking():
                 await self._interrupt()
+        elif kind == "input_audio_buffer.speech_stopped":
+            self._caller_speaking = False
+            self._last_caller_activity = time.monotonic()
         elif kind == "input_audio_buffer.committed":
             item_id = event.get("item_id")
             if item_id:
@@ -339,6 +356,7 @@ class OpenAIRealtimeSession:
                     whole = len(data) - len(data) % 2
                     self._carry = data[whole:]
                     if whole:
+                        self._ayo_has_spoken = True
                         now = time.monotonic()
                         self._playback_until = max(now, self._playback_until) + whole / PCM24K_BYTES_PER_SECOND
                         await self.on_audio(data[:whole])
@@ -346,6 +364,23 @@ class OpenAIRealtimeSession:
                 logger.warning("TTS failed: %s", type(exc).__name__)
             finally:
                 self._tts_busy = False
+
+    # ---------------- silence check-in ----------------
+    def _silence_due(self, now: float) -> bool:
+        """One check-in per silence: only after Ayo has spoken and finished, never mid-reply."""
+        return (self._ayo_has_spoken and not self._checked_in and not self._caller_speaking
+                and not self._response_active and not self._is_speaking()
+                and now - max(self._last_caller_activity, self._playback_until) >= SILENCE_CHECKIN_S)
+
+    async def _silence_worker(self) -> None:
+        while True:
+            await asyncio.sleep(0.5)
+            if self._ws is not None and self._silence_due(time.monotonic()):
+                self._checked_in = True
+                try:
+                    await self.send_text(SILENCE_NOTE)
+                except Exception as exc:
+                    logger.warning("Silence check-in failed: %s", type(exc).__name__)
 
     # ---------------- pairing transcripts with replies ----------------
     async def _turn_worker(self) -> None:

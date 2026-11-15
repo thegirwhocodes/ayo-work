@@ -48,9 +48,12 @@ from harness.tools.declarations import RELAY_DECLARATION, SUPPORT_GUIDANCE_DECLA
 from harness.tools import EmergencyCallContext, EmergencyTools, SpeakerVerifier, VoiceVerificationTool
 from settings import get_settings
 
-logger = logging.getLogger("sabi.voice.twilio")
+logger = logging.getLogger("ayo.voice.twilio")
 
 CONSENT_QUESTION = "may i text the emergency responder with what you shared"
+RUNTIME_CONTEXT_PLACEHOLDER = "{RUNTIME_CONTEXT}"
+FIRST_WORDS_MAX_BYTES = 30 * 8000 * 2  # keep at most the last 30 s of caller audio for replay
+GREETING_MESSAGE_BYTES = 1600          # 200 ms of 8 kHz mu-law per Twilio media message
 
 
 class TwilioMediaBridge:
@@ -61,12 +64,19 @@ class TwilioMediaBridge:
         voice_name: str = "Puck",
         on_transcript: Optional[Callable[[str, str], Awaitable[None]]] = None,
         on_safety_alert: Optional[Callable[[dict], Awaitable[None]]] = None,
+        greeting_audio: bytes = b"",
     ):
         self.ws = websocket
         self.system_prompt = system_prompt
         self.voice_name = voice_name
         self.on_transcript = on_transcript
         self.on_safety_alert = on_safety_alert
+        # Ayo's pre-recorded greeting (raw 8 kHz mu-law), played as soon as the stream starts.
+        self.greeting_audio = greeting_audio
+        self._greeting_task: Optional[asyncio.Task] = None
+        # What the caller says while their voice is being checked (before any AI is connected)
+        # is kept and replayed to the voice engine, so Ayo answers the child's first words.
+        self._first_words = bytearray()
 
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
@@ -119,7 +129,10 @@ class TwilioMediaBridge:
                         "Explain that the child can say no or ask to delete them; wait for their answer. Never claim memory was saved unless confirmed.")
             if self.memory:
                 support += "\nPreviously agreed communication preferences: " + json.dumps(self.memory)
-        return self.system_prompt + build_location_briefing(self.location) + support + (
+        base, briefing = self.system_prompt, build_location_briefing(self.location)
+        if RUNTIME_CONTEXT_PLACEHOLDER in base:  # Ayo's prompt has a slot for the caller context
+            base, briefing = base.replace(RUNTIME_CONTEXT_PLACEHOLDER, briefing.strip()), ""
+        return base + briefing + support + (
             "\nFor emergency actions use relay_to_harness. Before requesting a responder text, "
             "ask exactly: 'May I text the emergency responder with what you shared?' "
             "Wait for the caller's clear yes; never claim consent yourself. "
@@ -166,6 +179,7 @@ class TwilioMediaBridge:
             if not await self._connect_gemini():
                 await self.ws.close()
                 return
+            await self._replay_first_words()
         except Exception as e:
             logger.warning("Call verification failed: %s", type(e).__name__)
             await self.ws.close()
@@ -249,9 +263,12 @@ class TwilioMediaBridge:
                 token = start.get("customParameters", {}).get("caller_token", "")
                 caller_id = verify_caller(token, os.getenv("TWILIO_AUTH_TOKEN", ""))
                 self.emergency_context.caller_number = caller_id
+                self._start_greeting()
             elif event == "media" and caller_id:
                 payload = data.get("media", {}).get("payload", "")
-                if collector.add(mulaw_to_pcm16(base64.b64decode(payload, validate=True))):
+                pcm = mulaw_to_pcm16(base64.b64decode(payload, validate=True))
+                self._keep_first_words(pcm)
+                if collector.add(pcm):
                     break
             elif event == "stop":
                 raise RuntimeError("call ended before verification")
@@ -274,6 +291,36 @@ class TwilioMediaBridge:
             raise RuntimeError("speaker did not match enrollment")
         self.verification_status = result.status
         logger.info("Speaker check result: %s", result.status)
+
+    def _start_greeting(self) -> None:
+        if self.greeting_audio and self.stream_sid and self._greeting_task is None:
+            self._greeting_task = asyncio.create_task(self._play_greeting())
+
+    async def _play_greeting(self) -> None:
+        """Send Ayo's recorded greeting to Twilio; Twilio buffers and plays it in order."""
+        try:
+            for i in range(0, len(self.greeting_audio), GREETING_MESSAGE_BYTES):
+                frame = self.greeting_audio[i:i + GREETING_MESSAGE_BYTES]
+                await self.ws.send_text(json.dumps({
+                    "event": "media", "streamSid": self.stream_sid,
+                    "media": {"payload": base64.b64encode(frame).decode("ascii")}}))
+        except Exception as exc:  # a greeting failure must never end the call
+            logger.warning("Greeting playback failed: %s", type(exc).__name__)
+
+    def _keep_first_words(self, pcm: bytes) -> None:
+        self._first_words.extend(pcm)
+        overflow = len(self._first_words) - FIRST_WORDS_MAX_BYTES
+        if overflow > 0:
+            del self._first_words[:overflow]
+
+    async def _replay_first_words(self) -> None:
+        """Give the voice engine what the caller said during the voice check, in 20 ms frames."""
+        audio, self._first_words = bytes(self._first_words), bytearray()
+        if not audio or self.gemini_session is None:
+            return
+        for i in range(0, len(audio), 320):
+            await self.gemini_session.send_audio(audio[i:i + 320])
+        logger.info("Replayed %.1f s of the caller's first words to the voice engine", len(audio) / 16000)
 
     async def _setup_support(self):
         database_url = os.getenv("DATABASE_URL", "")

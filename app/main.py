@@ -1,4 +1,4 @@
-"""Sabi Safe — FastAPI Application Entrypoint.
+"""Ayo — FastAPI Application Entrypoint (built on the Sabi Safe telephony stack).
 
 Provides:
 - Inbound Twilio voice webhook (/voice/incoming) returning TwiML Media Streams.
@@ -32,7 +32,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("sabi.main")
+logger = logging.getLogger("ayo.main")
 
 # Must run before the module-level os.getenv calls below, or .env is ignored.
 try:
@@ -42,12 +42,46 @@ try:
 except ImportError:  # the real environment is authoritative in containers
     pass
 
-# Load system prompt
+# Load system prompt.
+# Ayo's real prompt is kept out of this public repo. Point AYO_PROMPT_PATH at a private copy
+# (e.g. private/ayo_prompt.md, git-ignored; source of truth is the private `ayo` repo).
+# Without it the bundled public prompt is used, exactly as before.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = Path(__file__).parent / "prompts" / "sabi_safe_prompt.md"
-if PROMPT_PATH.exists():
-    SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
-else:
-    SYSTEM_PROMPT = "You are Sabi Safe, a warm, calm, trauma-informed AI voice companion for youth."
+
+
+def _resolve(path: str) -> Path:
+    candidate = Path(path).expanduser()
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
+def load_system_prompt() -> str:
+    private_path = os.getenv("AYO_PROMPT_PATH", "")
+    if private_path:
+        resolved = _resolve(private_path)
+        if resolved.is_file():
+            logger.info("Using the private Ayo prompt from AYO_PROMPT_PATH")
+            return resolved.read_text(encoding="utf-8")
+        logger.warning("AYO_PROMPT_PATH is set but the file is missing; using the bundled prompt")
+    if PROMPT_PATH.exists():
+        return PROMPT_PATH.read_text(encoding="utf-8")
+    return "You are Ayo, a calm, warm listening friend on a free phone line for children."
+
+
+def load_greeting_audio() -> bytes:
+    """Ayo's pre-recorded greeting (raw 8 kHz mu-law), played the moment the call connects."""
+    path = os.getenv("AYO_GREETING_AUDIO", "")
+    if not path:
+        return b""
+    resolved = _resolve(path)
+    if not resolved.is_file():
+        logger.warning("AYO_GREETING_AUDIO is set but the file is missing; using the spoken prompt")
+        return b""
+    return resolved.read_bytes()
+
+
+SYSTEM_PROMPT = load_system_prompt()
+GREETING_AUDIO = load_greeting_audio()
 
 AUDIOSOCKET_PORT = int(os.getenv("AUDIOSOCKET_PORT", "9020"))
 ENABLE_AUDIOSOCKET = os.getenv("ENABLE_AUDIOSOCKET", "true").lower() in ("true", "1", "yes")
@@ -67,7 +101,7 @@ async def maintain_emergency_jobs():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global audiosocket_server
-    logger.info("Initializing Sabi Safe services...")
+    logger.info("Initializing Ayo services...")
     cleanup_task = None
     if get_settings().emergency_job_encryption_key:
         cleanup_task = asyncio.create_task(maintain_emergency_jobs())
@@ -86,7 +120,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logger.info("Shutting down Sabi Safe services...")
+    logger.info("Shutting down Ayo services...")
     if cleanup_task:
         cleanup_task.cancel()
         await asyncio.gather(cleanup_task, return_exceptions=True)
@@ -97,8 +131,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Sabi Safe Voice Telephony Stack",
-    description="Trauma-informed, full-duplex voice helpline stack powered by Gemini Live",
+    title="Ayo Voice Telephony Stack",
+    description="Ayo, a listening friend for children on the phone: full-duplex voice stack "
+                "(OpenAI Realtime + ElevenLabs, or Gemini Live)",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -144,8 +179,8 @@ async def health():
 @app.get("/")
 async def root():
     return {
-        "app": "Sabi Safe",
-        "description": "Trauma-informed voice helpline telephony stack",
+        "app": "Ayo",
+        "description": "A listening friend for children, on the phone",
         "endpoints": {
             "health": "/health",
             "twilio_webhook": "/voice/incoming",
@@ -211,9 +246,12 @@ async def voice_incoming(request: Request):
         for name, value in sorted(location.to_custom_parameters().items())
     )
 
+    # With Ayo's recorded greeting configured, the bridge plays it in Bukola's voice as soon as
+    # the stream starts, so Twilio's robotic <Say> is left out.
+    say = "" if GREETING_AUDIO else (
+        "\n    <Say>We use your voice to recognize you on future calls. Please speak for a few seconds.</Say>")
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say>We use your voice to recognize you on future calls. Please speak for a few seconds.</Say>
+<Response>{say}
     <Connect>
         <Stream url="{protocol}://{host}/ws/twilio">{parameter}{stream_params}
         </Stream>
@@ -231,6 +269,7 @@ async def ws_twilio(websocket: WebSocket):
         websocket=websocket,
         system_prompt=SYSTEM_PROMPT,
         voice_name=os.getenv("GEMINI_VOICE", "Puck"),
+        greeting_audio=GREETING_AUDIO,
     )
     await bridge.run()
 

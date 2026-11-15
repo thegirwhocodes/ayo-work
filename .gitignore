@@ -7,3 +7,6 @@ __pycache__/
 .langgraph_api/
 *.log
 eval_out/
+
+# Ayo private prompt and other non-public material (source of truth: private repo thegirwhocodes/ayo)
+private/

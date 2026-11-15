@@ -1,6 +1,21 @@
 # Ayo integration into Fortune's pipeline: study and plan
 
-*Branch `ayo-integration` from `origin/main` @ `26b1048` (PR #8). Written Nov 14 2026. Nothing has been changed in the code yet.*
+*Branch `ayo-integration` from `origin/main` @ `26b1048` (PR #8). Written Nov 14 2026.*
+
+## Status (Nov 14 2026)
+
+**Built and tested (107 passed, 3 skipped):**
+- OpenAI Realtime + Bukola engine behind `VOICE_ENGINE=openai` (`app/voice/openai_realtime.py`), tool converter, settings, `.env.example`, Compose.
+- Private prompt via `AYO_PROMPT_PATH` (git-ignored `private/`), with Ayo's `{RUNTIME_CONTEXT}` slot filled by the caller briefing; consent sentence untouched.
+- Bukola greeting from `AYO_GREETING_AUDIO` plays at stream start (Twilio `<Say>` dropped when set).
+- Caller audio spoken during the voice check is replayed to the engine so Ayo answers the first words.
+- Silence check-in (8 s, once per silence) in the engine; `[softly]`/`[whispers]` exempted from the prompt's "no brackets" rule.
+- Branding renamed to Ayo (title, root, logs `ayo.*`, fallback prompt). DB, Compose service and env names unchanged.
+- `scripts/live_engine_check.py`: runs a recorded clip through the real bridge prompt + resampler.
+
+**Still open (needs Naomi):** helplines (remove all but 112/911?), replace the voice-check hang-up with the known-child / new-voice / impostor flow, Nigerian line (Sabi's register handoff + flash callback), `test_async_emergency.py` skips (needs `TEST_EMERGENCY_DATABASE_URL`, an isolated Postgres).
+
+*Original plan below (written before the code).*
 
 **Goal:** turn this pipeline into **Ayo** without breaking any existing behaviour or tests:
 - **OpenAI realtime** (`gpt-realtime-2.1`, text mode) as the ears and brain, because it hears tone

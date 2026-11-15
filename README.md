@@ -1,4 +1,6 @@
-# Sabi Safe 🛡️📞
+# Ayo 📞
+
+**Ayo** is a listening friend for children on the phone, by Education for Equality. This repo is built on the Sabi Safe telephony stack. Set `VOICE_ENGINE=openai` for Ayo's voice (OpenAI Realtime hears and thinks, ElevenLabs Bukola speaks); see `docs/AYO_INTEGRATION.md`. Ayo's real prompt is private: set `AYO_PROMPT_PATH`.
 
 A clean, modular rebuild of the **Sabi full-duplex telephony voice stack**, purpose-built for **trauma-informed youth support, emotional grounding, and crisis triage**.
 
