@@ -69,6 +69,7 @@ services:
     depends_on:
       emergency-migrate:
         condition: service_completed_successfully
+      - TRACE_LIVE_CALLS=${TRACE_LIVE_CALLS:-false}
       support-init:
         condition: service_completed_successfully
       agent-server:

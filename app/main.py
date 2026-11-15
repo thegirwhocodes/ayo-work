@@ -26,7 +26,7 @@ from app.voice.twilio_stream import TwilioMediaBridge
 from app.voice.audiosocket import start_audiosocket_server
 from app.dashboard import router as dashboard_router
 from harness.caller_identity import sign_caller
-from harness.tracing import disable_live_tracing
+from harness.tracing import disable_live_tracing, live_tracing_allowed
 from harness.emergency_jobs import ACTIONS, add_voice_note, finish_job, job_briefing, poll_job_events, purge_expired_jobs, run_job_action
 from settings import get_settings
 
@@ -45,7 +45,10 @@ except ImportError:  # the real environment is authoritative in containers
     pass
 
 # A trace would record a child's words. Real calls are never traced; see harness/tracing.py.
-disable_live_tracing()
+if live_tracing_allowed():
+    logger.warning("TRACE_LIVE_CALLS is on: case-manager runs of live calls are sent to LangSmith. Test calls only.")
+else:
+    disable_live_tracing()
 
 # Load system prompt.
 # Ayo's prompt ships in this repo (app/prompts/ayo_prompt.md). AYO_PROMPT_PATH can override it with

@@ -20,6 +20,19 @@ from typing import Optional
 TRACING_VARIABLES = ("LANGSMITH_TRACING", "LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
 
 
+def live_tracing_allowed() -> bool:
+    """Opt-in for TEST calls only (TRACE_LIVE_CALLS=true). Off by default: a trace of a real call holds a child's words."""
+    return os.getenv("TRACE_LIVE_CALLS", "false").strip().lower() == "true"
+
+
+def live_trace_settings() -> Optional[dict]:
+    """The case manager's ``trace`` setting for a live call: None (untraced) unless TRACE_LIVE_CALLS is on."""
+    if not live_tracing_allowed():
+        return None
+    return {"project_name": os.getenv("LANGSMITH_PROJECT", "ayo"), "tags": ["live-test-call"],
+            "metadata": {"live_test_call": True}}
+
+
 def disable_live_tracing() -> None:
     """Switch LangSmith tracing off for this process. Call before any model call is made."""
     for name in TRACING_VARIABLES:

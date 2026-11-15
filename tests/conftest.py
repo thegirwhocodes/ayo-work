@@ -1,3 +1,8 @@
+import os
+
+# The app loads .env on import. Tests must never inherit a developer's opt-in to tracing live calls.
+os.environ["TRACE_LIVE_CALLS"] = "false"
+
 import pytest
 
 from harness.tool_log import bind_call, clear_events
