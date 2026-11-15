@@ -50,6 +50,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
+          command_timeout: 10m
           script_stop: true
           script: |
             set -euo pipefail
@@ -64,4 +65,15 @@ jobs:
             docker rm -f ayo-web 2>/dev/null || true
             docker compose up -d --build --force-recreate web
             docker compose ps web
-            curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/
+            # Next needs a beat after recreate before it accepts connections.
+            for i in $(seq 1 30); do
+              if code=$(curl -fsS -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/ 2>/dev/null); then
+                echo "$code"
+                exit 0
+              fi
+              echo "waiting for web ($i/30)…"
+              sleep 2
+            done
+            echo "web did not become ready"
+            docker compose logs --tail=80 web
+            exit 1
