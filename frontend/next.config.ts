@@ -4,6 +4,8 @@ const oneYear = "public, max-age=31536000, immutable";
 const hourSWR = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
 
 const nextConfig: NextConfig = {
+  // Slim runtime image for Compose / VPS (copies .next/standalone).
+  output: "standalone",
   poweredByHeader: false,
   compress: true,
   images: {

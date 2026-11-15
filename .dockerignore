@@ -5,3 +5,7 @@
 __pycache__
 .pytest_cache
 *.pyc
+frontend/node_modules
+frontend/.next
+frontend/brand-archive
+.github

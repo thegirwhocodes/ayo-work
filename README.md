@@ -62,9 +62,25 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 For the local Compose setup, set `GEMINI_API_KEY` and `TWILIO_AUTH_TOKEN` in
-`.env`, then run `docker compose --profile dev up --build`. This starts the app
-and a Postgres container with a persistent development volume. For a local
-non-Compose server, set `DATABASE_URL` to a PostgreSQL connection string.
+`.env`, then run `docker compose --profile dev up --build`. This starts the app,
+the public Ayo landing page on port `WEB_PORT` (default `3000`), and a Postgres
+container with a persistent development volume. Landing-only:
+
+```bash
+docker compose up -d --build web
+```
+
+Production VPS (full stack, after cloning this repo and filling `.env`):
+
+```bash
+docker compose up -d --build
+```
+
+Pushes to `main` run `.github/workflows/deploy.yml`, which builds the landing
+page in CI and SSHes to the VPS to `git pull` + `docker compose up -d --build`.
+Configure Actions secrets `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, and `VPS_APP_DIR`.
+
+For a local non-Compose server, set `DATABASE_URL` to a PostgreSQL connection string.
 
 The Twilio webhook validates the request signature and passes a short-lived
 signed caller number to the media stream. At call start, the service collects

@@ -1,4 +1,14 @@
 services:
+  # Public Ayo marketing site (Next.js). Independent of the voice stack.
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ayo-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
   sabi-safe:
     build: .
     container_name: sabi-safe
