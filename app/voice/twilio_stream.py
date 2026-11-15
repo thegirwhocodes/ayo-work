@@ -54,6 +54,15 @@ CONSENT_QUESTION = "may i text the emergency responder with what you shared"
 RUNTIME_CONTEXT_PLACEHOLDER = "{RUNTIME_CONTEXT}"
 FIRST_WORDS_MAX_BYTES = 30 * 8000 * 2  # keep at most the last 30 s of caller audio for replay
 GREETING_MESSAGE_BYTES = 1600          # 200 ms of 8 kHz mu-law per Twilio media message
+VERIFICATION_TIMEOUT_S = 12.0          # how long to wait for enough speech before carrying on as "unsure"
+
+# Voice identity states. A failed or impossible voice check never ends the call (a child who whispers,
+# cries, is silent, shares a phone, or calls while the database is down must still reach Ayo).
+IDENTITY_KNOWN = "known"      # voice matches the enrolled voice for this caller
+IDENTITY_NEW = "new"          # first call: this voice was just enrolled
+IDENTITY_UNKNOWN = "unknown"  # a different voice from the enrolled one
+IDENTITY_UNSURE = "unsure"    # could not tell (too little speech, check failed, database down)
+_IDENTITY_BY_STATUS = {"matched": IDENTITY_KNOWN, "enrolled": IDENTITY_NEW, "not_matched": IDENTITY_UNKNOWN}
 
 
 class TwilioMediaBridge:
@@ -99,6 +108,8 @@ class TwilioMediaBridge:
         self.memory = None
         self.memory_consent_pending = False
         self.verification_status = None
+        self.identity_state = IDENTITY_UNSURE
+        self.identity_reason = "not_checked"
         self.memory_lock = asyncio.Lock()
         self.memory_tasks = set()
 
@@ -247,15 +258,25 @@ class TwilioMediaBridge:
             logger.info("Twilio Media Bridge closed.")
 
     async def verify_call(self):
-        """Collect initial voiced audio and enroll or verify before conversation."""
+        """Collect initial voiced audio, then enroll or verify the caller's voice.
+
+        Sets `identity_state` (known / new / unknown / unsure) and never ends the call over the
+        result. Only a bad caller token or a hang-up before the stream starts is fatal.
+        """
         collector = SpeechCollector()
         caller_id = None
-        deadline = asyncio.get_running_loop().time() + 30
+        enough_speech = True
+        deadline = asyncio.get_running_loop().time() + VERIFICATION_TIMEOUT_S
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                raise TimeoutError("not enough speech for verification")
-            data = json.loads(await asyncio.wait_for(self.ws.receive_text(), timeout=remaining))
+                enough_speech = False
+                break
+            try:
+                data = json.loads(await asyncio.wait_for(self.ws.receive_text(), timeout=remaining))
+            except asyncio.TimeoutError:
+                enough_speech = False
+                break
             event = data.get("event")
             if event == "start":
                 start = data.get("start", {})
@@ -273,6 +294,21 @@ class TwilioMediaBridge:
             elif event == "stop":
                 raise RuntimeError("call ended before verification")
 
+        if not caller_id:
+            raise RuntimeError("no caller identity: the stream never started")
+        if not enough_speech:
+            self._set_identity(IDENTITY_UNSURE, "not_enough_speech")
+            return
+        try:
+            await self._check_voice(collector, caller_id)
+        except Exception as exc:  # database down, model failure, ...: carry on, never hang up
+            self._set_identity(IDENTITY_UNSURE, f"check_failed:{type(exc).__name__}")
+
+    def _set_identity(self, state: str, reason: str) -> None:
+        self.identity_state, self.identity_reason = state, reason
+        logger.info("Voice identity: %s (%s)", state, reason)
+
+    async def _check_voice(self, collector, caller_id: str) -> None:
         store = PostgresVoiceStore(os.getenv("DATABASE_URL", ""))
         await asyncio.to_thread(store.initialize)
         verifier = SpeakerVerifier(store, float(os.getenv("VOICE_VERIFICATION_THRESHOLD", "0.75")))
@@ -286,11 +322,10 @@ class TwilioMediaBridge:
         voice_tool.audio_data = b""
         result = voice_tool.result
         if result is None:
-            raise RuntimeError("speaker verification tool was not called")
-        if result.status not in ("matched", "enrolled"):
-            raise RuntimeError("speaker did not match enrollment")
-        self.verification_status = result.status
-        logger.info("Speaker check result: %s", result.status)
+            self._set_identity(IDENTITY_UNSURE, "verification_tool_not_called")
+            return
+        self.verification_status = result.status if result.status in _IDENTITY_BY_STATUS else None
+        self._set_identity(_IDENTITY_BY_STATUS.get(result.status, IDENTITY_UNSURE), result.status)
 
     def _start_greeting(self) -> None:
         if self.greeting_audio and self.stream_sid and self._greeting_task is None:
@@ -402,6 +437,8 @@ class TwilioMediaBridge:
         if action == "send_text_message" and not self.emergency_context.responder_consent:
             return {"status": "consent_required"}
         if self.harness_agent is None:
+            self._ensure_harness_agent()
+        if self.harness_agent is None:
             return {"status": "unavailable", "reason": "harness_not_ready"}
         tools = EmergencyTools(self.emergency_context, action, message)
         try:
@@ -413,6 +450,15 @@ class TwilioMediaBridge:
         self.emergency_tasks.add(task)
         task.add_done_callback(self.emergency_tasks.discard)
         return {"status": "pending"}
+
+    def _ensure_harness_agent(self) -> None:
+        """The agent is normally built during the voice check; build it now if that was skipped."""
+        if self.harness_agent is not None or not self.emergency_context.caller_number:
+            return
+        try:
+            self.harness_agent = create_harness(VoiceVerificationTool(None, self.emergency_context.caller_number, b""))
+        except Exception as exc:
+            logger.warning("Harness unavailable: %s", type(exc).__name__)
 
     async def run_emergency_job(self, token: str):
         try:

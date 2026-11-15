@@ -85,7 +85,7 @@ def test_harness_uses_tool_result_not_model_text(monkeypatch):
 
 
 @pytest.mark.parametrize("tool_called", [True, False])
-def test_twilio_verification_uses_signed_number_and_fails_closed(monkeypatch, tool_called):
+def test_twilio_verification_uses_signed_number_and_never_hangs_up(monkeypatch, tool_called):
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "secret")
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     received = {}
@@ -125,8 +125,8 @@ def test_twilio_verification_uses_signed_number_and_fails_closed(monkeypatch, to
         {"event": "media", "media": {"payload": base64.b64encode(b"audio").decode()}},
     ])
     bridge = TwilioMediaBridge(WebSocket(), "prompt")
-    error = "did not match" if tool_called else "not called"
-    with pytest.raises(RuntimeError, match=error):
-        asyncio.run(bridge.verify_call())
+    asyncio.run(bridge.verify_call())  # a mismatch or a skipped tool no longer ends the call
     assert received == {"caller_id": "+1234567890", "audio": b"sample"}
     assert bridge.location.country == "US"
+    assert bridge.identity_state == ("unknown" if tool_called else "unsure")
+    assert bridge.verification_status == ("not_matched" if tool_called else None)

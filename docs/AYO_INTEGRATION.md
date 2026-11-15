@@ -13,7 +13,9 @@
 - Branding renamed to Ayo (title, root, logs `ayo.*`, fallback prompt). DB, Compose service and env names unchanged.
 - `scripts/live_engine_check.py`: runs a recorded clip through the real bridge prompt + resampler.
 
-**Still open (needs Naomi):** helplines (remove all but 112/911?), replace the voice-check hang-up with the known-child / new-voice / impostor flow, Nigerian line (Sabi's register handoff + flash callback), `test_async_emergency.py` skips (needs `TEST_EMERGENCY_DATABASE_URL`, an isolated Postgres).
+- **Voice check no longer hangs up** (Nov 14, Naomi: voice is the identity layer). `verify_call()` sets `identity_state`: `known` (matched), `new` (just enrolled), `unknown` (different voice), `unsure` (too little speech within 12 s, database down, check failed). Only a forged caller token or a hang-up before the stream starts ends the call. Nothing acts on the state yet (no questions, no alerts, Ayo is not told). Memory still only reads for `matched`.
+
+**Still open (needs Naomi):** helplines (kept as is, her call), what Ayo and the alert path do with `unknown`/`unsure` (four-state flow, safe facts, human-first alerts), swap ECAPA for the `voice-id` lane, Nigerian line (Sabi's register handoff + flash callback), `test_async_emergency.py` skips (needs `TEST_EMERGENCY_DATABASE_URL`, an isolated Postgres).
 
 *Original plan below (written before the code).*
 
