@@ -206,6 +206,21 @@ async def _twilio_params(request: Request) -> dict[str, str]:
     return params
 
 
+def _caller_view(params: dict[str, str]) -> dict[str, str]:
+    """For a call Ayo places (Direction=outbound-api), the person is on the `To` side.
+
+    Twilio fills From* with Ayo's own number, so swap To* into From* before anything keys identity
+    or location on "the caller". Inbound calls are returned unchanged.
+    """
+    if not params.get("Direction", "").startswith("outbound"):
+        return params
+    view = {k: v for k, v in params.items() if not k.startswith("From")}
+    for key, value in params.items():
+        if key.startswith("To"):
+            view["From" + key[2:]] = value
+    return view
+
+
 @app.api_route("/voice/incoming", methods=["GET", "POST"])
 async def voice_incoming(request: Request):
     """Twilio Inbound Voice Webhook.
@@ -217,14 +232,15 @@ async def voice_incoming(request: Request):
     """
     host = request.headers.get("host", "localhost:8000")
     protocol = "wss" if "https" in str(request.base_url) else "ws"
-    params = await _twilio_params(request)
+    raw_params = await _twilio_params(request)  # exactly what Twilio signed
+    params = _caller_view(raw_params)
     caller = params.get("From", "")
     secret = os.getenv("TWILIO_AUTH_TOKEN", "")
     parameter = ""
     if caller and secret:
         from twilio.request_validator import RequestValidator
 
-        if not RequestValidator(secret).validate(str(request.url), params if request.method == "POST" else {}, request.headers.get("X-Twilio-Signature", "")):
+        if not RequestValidator(secret).validate(str(request.url), raw_params if request.method == "POST" else {}, request.headers.get("X-Twilio-Signature", "")):
             return Response(status_code=403)
         try:
             token = sign_caller(caller, secret)

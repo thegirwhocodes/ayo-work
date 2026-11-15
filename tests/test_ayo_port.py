@@ -186,3 +186,29 @@ def test_silence_check_in_sends_one_note_and_child_speech_rearms():
     asyncio.run(go())
     notes = [m for m in session._ws.sent if m["type"] == "conversation.item.create"]
     assert len(notes) == 1 and notes[0]["item"]["content"][0]["text"] == SILENCE_NOTE
+
+
+def test_outbound_call_keys_identity_and_location_on_the_person_not_ayos_number():
+    from app.main import _caller_view
+
+    outbound = {"Direction": "outbound-api", "From": "+17153122345", "FromCountry": "US",
+                "To": "+2348012345678", "ToCountry": "NG", "ToCity": "LAGOS"}
+    view = _caller_view(outbound)
+    assert view["From"] == "+2348012345678" and view["FromCountry"] == "NG" and view["FromCity"] == "LAGOS"
+    inbound = {"Direction": "inbound", "From": "+2348012345678", "To": "+17153122345"}
+    assert _caller_view(inbound) is inbound
+
+
+def test_outbound_webhook_signs_the_callee_and_validates_the_original_signature(monkeypatch):
+    from fastapi.testclient import TestClient
+    from twilio.request_validator import RequestValidator
+    from app import main
+
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "secret")
+    form = {"Direction": "outbound-api", "From": "+17153122345", "To": "+2348012345678", "CallSid": "CA1"}
+    sig = RequestValidator("secret").compute_signature("http://testserver/voice/incoming", form)
+    response = TestClient(main.app).post("/voice/incoming", data=form, headers={"X-Twilio-Signature": sig})
+    assert response.status_code == 200 and 'name="caller_token"' in response.text
+    token = response.text.split('name="caller_token" value="')[1].split('"')[0]
+    from harness.caller_identity import verify_caller
+    assert verify_caller(token, "secret") == "+2348012345678"
