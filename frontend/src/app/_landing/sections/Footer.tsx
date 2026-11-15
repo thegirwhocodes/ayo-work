@@ -66,7 +66,7 @@ export default function Footer() {
             </div>
           </div>
           <a
-            href="https://github.com/thegirwhocodes/safe-line"
+              href="https://github.com/thegirwhocodes/ayo-work"
             target="_blank"
             rel="noopener noreferrer"
             className="press inline-flex min-h-11 w-fit shrink-0 items-center touch-manipulation rounded-sm text-sm text-white/70 underline decoration-white/30 underline-offset-4 transition-colors duration-200 hover:text-white hover:decoration-white focus-visible:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#1B2A4A]"
