@@ -227,3 +227,56 @@ def test_gemini_case_manager_uses_the_first_model_and_keeps_the_rest_as_fallback
     case_manager.gemini_case_manager(["primary", "backup", "primary"], "key", search="S")
     assert built["model"].name == "primary" and [m.name for m in built["fallbacks"]] == ["backup"]  # de-duplicated, order kept
     assert built["kw"] == {"search": "S"}
+
+
+def test_opening_guidance_fills_the_gap_before_the_first_cycle():
+    import asyncio
+    from app.voice.twilio_stream import TwilioMediaBridge
+    from harness.coordinator import OPENING_GUIDANCE
+
+    bridge = TwilioMediaBridge(None, "prompt")
+
+    async def never(transcript, profile):
+        await asyncio.sleep(3600)
+
+    async def go():
+        bridge.coordinator = Coordinator(never)
+        before = await bridge._dispatch_tool("get_support_guidance", {})
+        bridge.coordinator.observe("I am scared", "I am here")
+        pending = await bridge._dispatch_tool("get_support_guidance", {})
+        await bridge.coordinator.close()
+        return before, pending
+
+    before, pending = asyncio.run(go())
+    assert before["status"] == "unavailable" and before["next_move"] == OPENING_GUIDANCE["next_move"]
+    assert pending["status"] == "pending" and pending["stance"] == OPENING_GUIDANCE["stance"]
+    assert all("why" not in item.lower() or item.lower().startswith("do not") for item in OPENING_GUIDANCE["do"] + OPENING_GUIDANCE["avoid"])
+
+
+def test_finished_guidance_is_pushed_to_the_voice_agent_without_a_reply():
+    import asyncio
+    from app.voice.twilio_stream import TwilioMediaBridge
+
+    sent = []
+
+    class Engine:
+        async def send_text(self, text, *, turn_complete=True):
+            sent.append((text, turn_complete))
+
+    bridge = TwilioMediaBridge(None, "prompt")
+    bridge.gemini_session, bridge._running = Engine(), True
+
+    async def analyst(transcript, profile):
+        return CaseAnalysis(advice=Advice(risk="elevated", stance="Gentle.", do=["Reflect."], avoid=["Why questions."],
+                                          next_move="Ask one gentle question."))
+
+    async def go():
+        bridge.coordinator = Coordinator(analyst, on_guidance=bridge._on_guidance)
+        bridge.coordinator.observe("I am scared", "I am here")
+        await bridge.coordinator.idle()
+        await asyncio.gather(*bridge.memory_tasks)
+        await bridge.coordinator.close()
+
+    asyncio.run(go())
+    assert sent and all(turn_complete is False for _, turn_complete in sent)  # silent context: it must not make the agent speak
+    assert any("Application guidance" in text and "Ask one gentle question." in text for text, _ in sent)

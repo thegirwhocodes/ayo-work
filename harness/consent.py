@@ -22,7 +22,7 @@ MAX_WORDS = 6
 
 YES_WORDS = frozenset({
     # English
-    "yes", "yeah", "yep", "yup", "sure", "okay", "ok", "agree", "ahead", "definitely", "absolutely",
+    "yes", "yeah", "yep", "yup", "sure", "okay", "ok", "agree", "ahead", "definitely", "absolutely", "consent",
     # Nigerian Pidgin
     "ehn", "yessir", "abeg",
     # Yoruba
@@ -33,7 +33,7 @@ YES_WORDS = frozenset({
 # Words that may surround a yes ("yes you may", "go ahead", "yes abeg do am") but never make one alone.
 FILLER_WORDS = frozenset({
     "please", "you", "may", "can", "could", "i", "it", "do", "does", "am", "go", "thank", "thanks", "so", "that",
-    "is", "fine", "na", "dey", "o", "oh", "jowo", "e", "now", "sir", "ma", "madam", "my", "of", "course",
+    "give", "is", "fine", "na", "dey", "o", "oh", "jowo", "e", "now", "sir", "ma", "madam", "my", "of", "course",
     "contact", "them", "text", "call", "tell", "ina", "to", "sha", "very", "much", "alright", "right",
 })
 # Answers that are only a yes as a whole (Hausa "to" means "okay"), not as a word inside a longer sentence.

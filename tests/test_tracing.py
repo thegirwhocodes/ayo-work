@@ -56,3 +56,14 @@ def test_only_a_case_manager_given_trace_settings_traces():
                           trace={"client": client, "project_name": "demo", "tags": ["synthetic"]})
     assert cycle(manager) == [True]
     assert client.create_run.called or client.multipart_ingest.called or client.method_calls  # runs went to the stand-in
+
+
+def test_live_calls_are_untraced_unless_opted_in(monkeypatch):
+    from harness.tracing import live_trace_settings, live_tracing_allowed
+
+    monkeypatch.delenv("TRACE_LIVE_CALLS", raising=False)
+    assert not live_tracing_allowed() and live_trace_settings() is None
+    monkeypatch.setenv("TRACE_LIVE_CALLS", "true")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "p")
+    settings = live_trace_settings()
+    assert settings["project_name"] == "p" and "live-test-call" in settings["tags"]

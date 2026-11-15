@@ -64,9 +64,19 @@ def run_check(monkeypatch, events, *, collector_done=True, result="matched", sto
     monkeypatch.setattr(twilio_stream, "SpeakerVerifier", Verifier)
     monkeypatch.setattr(twilio_stream, "create_harness", Agent)
     if timeout is not None:
-        monkeypatch.setattr(twilio_stream, "VERIFICATION_TIMEOUT_S", timeout)
+        monkeypatch.setattr(twilio_stream, "START_TIMEOUT_S", timeout)
     bridge = TwilioMediaBridge(WebSocket(), "prompt")
-    asyncio.run(bridge.verify_call())
+
+    async def call():
+        # the real flow: wait for `start`, then feed media into the quiet background check
+        await bridge._await_start()
+        for event in feed:
+            if event.get("event") == "media":
+                bridge._collect_for_verification(b"\x00" * 320)
+        if bridge._verify_task:
+            await bridge._verify_task
+
+    asyncio.run(call())
     return bridge
 
 
@@ -83,9 +93,15 @@ def test_known_and_new_keep_memory_eligibility_unknown_does_not(monkeypatch):
 
 
 def test_too_little_speech_is_unsure_not_a_hangup(monkeypatch):
-    bridge = run_check(monkeypatch, [start()], timeout=0.2)  # whispering or silent child: no voiced audio
-    assert bridge.identity_state == "unsure" and bridge.identity_reason == "not_enough_speech"
-    assert bridge.emergency_context.caller_number == NUMBER
+    bridge = run_check(monkeypatch, [start(), media()], collector_done=False)  # whispering or silent child: no voiced audio
+    assert bridge.identity_state == "unsure" and bridge.identity_reason == "not_checked"
+    assert bridge._verify_task is None and bridge.emergency_context.caller_number == NUMBER
+
+
+def test_the_check_never_blocks_the_conversation(monkeypatch):
+    """_await_start returns at `start`; enough speech later spawns a task instead of awaiting the check."""
+    bridge = run_check(monkeypatch, [start()])
+    assert bridge._voice_collector is not None and bridge._verify_task is None  # nothing asked of the caller yet
 
 
 def test_database_down_is_unsure_not_a_hangup(monkeypatch):
@@ -111,7 +127,7 @@ def test_hangup_before_the_stream_starts_is_still_fatal(monkeypatch):
 
 
 def test_emergency_agent_is_built_on_demand_when_the_check_was_skipped(monkeypatch):
-    bridge = run_check(monkeypatch, [start()], timeout=0.2)
+    bridge = run_check(monkeypatch, [start(), media()], collector_done=False)
     assert bridge.harness_agent is None
     bridge._ensure_harness_agent()
     assert bridge.harness_agent is not None

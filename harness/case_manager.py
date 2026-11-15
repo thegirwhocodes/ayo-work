@@ -305,10 +305,16 @@ class CaseManager:
                                 memory=triage.memory if triage else MemoryUpdate(), ran=sorted(replies))
 
 
-def gemini_case_manager(models, api_key: str, search: Optional[ReferenceSearch] = None, **kwargs) -> CaseManager:
-    """A case manager on Gemini. The first model is primary; the rest are fallbacks for a 503 or 429."""
+def gemini_case_manager(models, api_key: str, search: Optional[ReferenceSearch] = None,
+                        thinking_level: Optional[str] = None, **kwargs) -> CaseManager:
+    """A case manager on Gemini. The first model is primary; the rest are fallbacks for a 503 or 429.
+
+    ``thinking_level`` ("minimal", "low", ...) caps how long each model call thinks. The guidance has to arrive
+    within a turn or two of the call, so the default for live calls (COORDINATOR_THINKING_LEVEL) is "minimal".
+    """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     names = list(dict.fromkeys([models] if isinstance(models, str) else models))
-    chats = [ChatGoogleGenerativeAI(model=name, api_key=api_key) for name in names]
+    extra = {"thinking_level": thinking_level} if thinking_level else {}
+    chats = [ChatGoogleGenerativeAI(model=name, api_key=api_key, **extra) for name in names]
     return CaseManager(chats[0], chats[1:], search=search, **kwargs)

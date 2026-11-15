@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
@@ -35,11 +36,15 @@ logger = logging.getLogger("ayo.openai_realtime")
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe"
+# Without a language the transcriber guessed Cyrillic for a caller's English "yes you may" (a real test call), which
+# broke consent matching. Pin it; set OPENAI_TRANSCRIBE_LANGUAGE for a line that serves another language ("" = detect).
+TRANSCRIBE_LANGUAGE_DEFAULT = "en"
 # Tuned on Naomi's recorded clips (Nov 14 2026): 1.2 s of quiet ends a turn, so a crying child's
 # short pauses don't cut them off; threshold 0.4 hears quiet voices. Replies came 0.7-1.3 s later.
 TURN_DETECTION = {"type": "server_vad", "threshold": 0.4, "prefix_padding_ms": 300,
                   "silence_duration_ms": 1200, "create_response": True, "interrupt_response": True}
 TRANSCRIPT_WAIT_S = 1.5
+
 PCM24K_BYTES_PER_SECOND = 24000 * 2
 TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format=pcm_24000"
 
@@ -83,13 +88,18 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer
 
 
+def transcription_config() -> dict[str, Any]:
+    language = os.getenv("OPENAI_TRANSCRIBE_LANGUAGE", TRANSCRIBE_LANGUAGE_DEFAULT).strip()
+    return {"model": TRANSCRIBE_MODEL, **({"language": language} if language else {})}
+
+
 def build_session_update(cfg: LiveConfig) -> dict[str, Any]:
     session: dict[str, Any] = {
         "type": "realtime",
         "output_modalities": ["text"],
         "instructions": cfg.system_prompt + VOICE_STYLE_NOTE,
         "audio": {"input": {"format": {"type": "audio/pcmu"},
-                            "transcription": {"model": TRANSCRIBE_MODEL},
+                            "transcription": transcription_config(),
                             "turn_detection": dict(TURN_DETECTION)}},
     }
     if cfg.tools:
