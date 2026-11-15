@@ -31,7 +31,7 @@ def test_runtime_context_slot_gets_location_and_consent_rules_stay():
     assert "{RUNTIME_CONTEXT}" not in prompt
     header, rest = prompt.split("CALLER CONTEXT", 1)
     assert header.startswith("Ayo header") and "Ayo footer" in rest  # briefing sits in the slot
-    assert "May I text the emergency responder with what you shared?" in prompt
+    assert "May I contact the emergency responder with what you shared?" in prompt
     assert CONSENT_QUESTION in prompt.lower().replace("?", "").replace("'", "")
 
 

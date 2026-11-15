@@ -10,7 +10,7 @@ import sys
 
 import psycopg
 
-from harness.corpus.model import LazyEmbeddings, cohere_embeddings
+from harness.corpus.model import cohere_embeddings
 from harness.corpus.sync import sync_corpus
 from scripts.migrate_support import main as migrate
 
@@ -25,7 +25,7 @@ def main():
     migrate()
     logger.info("Support schema is up to date.")
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as connection:
-        results = sync_corpus(connection, LazyEmbeddings(cohere_embeddings))
+        results = sync_corpus(connection, cohere_embeddings)
     for title, status in results:
         logger.info("Corpus %s: %s", title, status)
     if strict and any(status.startswith("failed") for _, status in results):

@@ -25,7 +25,9 @@ class Settings:
     photon_api_key: str = field(repr=False)
     photon_project_id: str
     photon_sender_id: str
+    photon_resource_id: str
     emergency_responder_number: str
+    emergency_backup_responder_number: str
     agent_server_url: str
     emergency_callback_url: str
     emergency_worker_secret: str = field(repr=False)
@@ -37,6 +39,7 @@ class Settings:
     elevenlabs_api_key: str = field(repr=False)
     elevenlabs_voice_id: str
     elevenlabs_model: str
+    dashboard_token: str = field(repr=False)
 
 
 @lru_cache(maxsize=1)
@@ -54,7 +57,7 @@ def get_settings() -> Settings:
         gemini_voice=value("GEMINI_VOICE", "Puck"),
         gemini_live_model=value("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
         gemini_live_voice=value("GEMINI_LIVE_VOICE", "Kore"),
-        harness_model=value("HARNESS_MODEL", "gemini-2.5-flash"),
+        harness_model=value("HARNESS_MODEL", "gemini-3.5-flash"),
         port=int(value("PORT", "8000")),
         audiosocket_port=int(value("AUDIOSOCKET_PORT", "9020")),
         enable_audiosocket=value("ENABLE_AUDIOSOCKET", "true").lower() in ("true", "1", "yes"),
@@ -66,7 +69,9 @@ def get_settings() -> Settings:
         photon_api_key=value("PHOTON_API_KEY"),
         photon_project_id=value("PHOTON_PROJECT_ID"),
         photon_sender_id=value("PHOTON_SENDER_ID"),
+        photon_resource_id=value("PHOTON_RESOURCE_ID"),
         emergency_responder_number=value("EMERGENCY_RESPONDER_NUMBER"),
+        emergency_backup_responder_number=value("EMERGENCY_BACKUP_RESPONDER_NUMBER"),
         agent_server_url=value("AGENT_SERVER_URL", "http://127.0.0.1:2024"),
         emergency_callback_url=value("EMERGENCY_CALLBACK_URL", "http://127.0.0.1:8000/internal/emergency-job"),
         emergency_worker_secret=value("EMERGENCY_WORKER_SECRET"),
@@ -78,4 +83,5 @@ def get_settings() -> Settings:
         elevenlabs_api_key=value("ELEVENLABS_API_KEY"),
         elevenlabs_voice_id=value("ELEVENLABS_VOICE_ID", "oC2pCZZWEDRe6lmZpaaw"),
         elevenlabs_model=value("ELEVENLABS_MODEL", "eleven_v4_turbo"),
+        dashboard_token=value("DASHBOARD_TOKEN"),
     )

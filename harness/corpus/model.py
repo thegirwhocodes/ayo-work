@@ -26,20 +26,3 @@ class CohereSupportEmbeddings(Embeddings):
 def cohere_embeddings():
     return CohereSupportEmbeddings(os.environ["COHERE_API_KEY"])
 
-
-class LazyEmbeddings(Embeddings):
-    """Defers building the real client (and needing its API key) until text is embedded."""
-
-    def __init__(self, factory):
-        self._factory, self._inner = factory, None
-
-    def _client(self):
-        if self._inner is None:
-            self._inner = self._factory()
-        return self._inner
-
-    def embed_documents(self, texts):
-        return self._client().embed_documents(texts)
-
-    def embed_query(self, text):
-        return self._client().embed_query(text)

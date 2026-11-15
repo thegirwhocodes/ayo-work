@@ -17,4 +17,6 @@ COPY . .
 
 EXPOSE 8000 9020
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run behind a TLS-terminating proxy/tunnel: honour X-Forwarded-Proto so Twilio signature
+# validation and the wss:// stream URL use the public https scheme.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

@@ -98,7 +98,7 @@ def test_consent_and_relay_fail_closed(monkeypatch):
     assert run(bridge.relay_to_harness("relay_to_harness", {"action": "send_text_message", "message": "help"}))["status"] == "consent_required"
 
     async def give_consent():
-        await bridge._on_turn_complete("", "May I text the emergency responder with what you shared?")
+        await bridge._on_turn_complete("", "May I contact the emergency responder with what you shared?")
         await bridge._on_turn_complete("Yes please", "Okay.")
     run(give_consent())
     assert bridge.emergency_context.responder_consent
@@ -134,7 +134,7 @@ def test_consent_and_relay_fail_closed(monkeypatch):
     async def exercise():
         bridge.harness_agent = Agent()
         bridge.gemini_session = Session()
-        result = await bridge.relay_to_harness("relay_to_harness", {"action": "start_phone_call"})
+        result = await bridge.relay_to_harness("relay_to_harness", {"action": "start_phone_call", "message": "help"})
         assert result == {"status": "pending"}
         await asyncio.gather(*bridge.emergency_tasks)
         return bridge.gemini_session.messages
@@ -147,7 +147,7 @@ def test_consent_and_relay_fail_closed(monkeypatch):
 def test_tool_is_restricted_to_requested_action():
     tools = EmergencyTools(EmergencyCallContext("+19876543210"), "start_phone_call")
     assert json.loads(run(tools.request_location()))["reason"] == "action_not_requested"
-    assert json.loads(run(tools.start_phone_call()))["status"] == "not_implemented"
+    assert json.loads(run(tools.start_phone_call()))["status"] == "consent_required"
 
 
 def test_gemini_is_exposed_only_to_relay_and_main_harness_has_async_subagent(monkeypatch):

@@ -10,7 +10,7 @@ import json
 import logging
 from pathlib import Path
 
-from harness.corpus.ingest import ingest_source, sections_from_markdown
+from harness.corpus.ingest import ingest_source, is_current, sections_from_markdown
 
 logger = logging.getLogger("sabi.corpus.sync")
 MANIFEST = Path(__file__).resolve().parent / "sources.json"
@@ -27,8 +27,8 @@ def load_sources(manifest=MANIFEST):
     return sources
 
 
-def sync_corpus(connection, embeddings, manifest=MANIFEST):
-    """Return [(title, status)] where status is skipped/unchanged/ingested/failed."""
+def sync_corpus(connection, make_embeddings, manifest=MANIFEST):
+    """`make_embeddings` is called only when a source must be embedded. Return [(title, status)] where status is skipped/unchanged/ingested/failed."""
     results = []
     with connection.cursor() as cur:
         cur.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
@@ -44,8 +44,12 @@ def sync_corpus(connection, embeddings, manifest=MANIFEST):
                 results.append((title, "skipped: not approved"))
                 continue
             try:
-                count = ingest_source(connection, source, embeddings)
-                results.append((title, f"ingested {count} chunks" if count else "unchanged"))
+                if is_current(connection, source):
+                    results.append((title, "unchanged"))
+                    continue
+                # Only now is an embedding client (and its API key) needed.
+                count = ingest_source(connection, source, make_embeddings())
+                results.append((title, f"ingested {count} chunks"))
             except Exception as exc:
                 logger.error("Corpus ingest failed for %s: %s", title, type(exc).__name__)
                 results.append((title, f"failed: {type(exc).__name__}"))

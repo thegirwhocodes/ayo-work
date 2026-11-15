@@ -1,5 +1,8 @@
 {
   "dependencies": ["."],
-  "graphs": {"emergency": "./harness/emergency_subagent.py:graph"},
+  "graphs": {
+    "emergency": "./harness/emergency_subagent.py:graph",
+    "case_manager": "./harness/studio.py:make_graph"
+  },
   "auth": {"path": "./harness/agent_auth.py:auth"}
 }

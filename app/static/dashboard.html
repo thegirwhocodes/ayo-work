@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sabi Safe live case view</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --ink: #1d2327; --muted: #5f6b73; --line: #dedbd2;
+    --routine: #2f7d4f; --routine-bg: #e3f1e8; --elevated: #9a6200; --elevated-bg: #fbefd4;
+    --urgent: #b3261e; --urgent-bg: #fbe3e1; --info: #2a5db0; --info-bg: #e4ecfa; --off: #8a949b; --off-bg: #eceae4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181b; --card: #1c2226; --ink: #e8ecee; --muted: #9aa6ad; --line: #2e373d;
+      --routine: #6fcf97; --routine-bg: #1b3326; --elevated: #f0b84d; --elevated-bg: #3a2c10;
+      --urgent: #ff8a80; --urgent-bg: #3d1a18; --info: #8fb4f0; --info-bg: #1b2a44; --off: #7d8991; --off-bg: #262d32;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .status { margin-left: auto; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
+  .dot.ok { background: var(--routine); } .dot.bad { background: var(--urgent); }
+  .login { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; max-width: 420px; }
+  .login label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .login input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+  .login button { margin-top: 10px; padding: 8px 14px; border: 0; border-radius: 6px; background: var(--info); color: #fff; font: inherit; cursor: pointer; }
+  .login .err { color: var(--urgent); margin-top: 8px; min-height: 1.2em; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  .stat b { display: block; font-size: 24px; line-height: 1.1; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); padding: 28px 0; text-align: center; }
+  .call { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+  .call.urgent { border-color: var(--urgent); }
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+  .ref { font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 22px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--off-bg); color: var(--muted); }
+  .pill.routine, .pill.granted, .pill.submitted, .pill.acknowledged, .pill.satisfied { background: var(--routine-bg); color: var(--routine); }
+  .pill.elevated, .pill.withdrawn, .pill.check_in_sent, .pill.unknown, .pill.revised { background: var(--elevated-bg); color: var(--elevated); }
+  .pill.urgent, .pill.unavailable, .pill.unreachable, .pill.emergency_number_advised, .pill.unsatisfied, .pill.consent_required { background: var(--urgent-bg); color: var(--urgent); }
+  .pill.live { background: var(--info-bg); color: var(--info); }
+  .timeline { display: flex; gap: 3px; flex-wrap: wrap; margin-bottom: 6px; min-height: 18px; }
+  .tick { width: 14px; height: 18px; border-radius: 3px; background: var(--off-bg); border: 1px solid var(--line); }
+  .tick.routine { background: var(--routine); border-color: var(--routine); }
+  .tick.elevated { background: var(--elevated); border-color: var(--elevated); }
+  .tick.urgent { background: var(--urgent); border-color: var(--urgent); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
+  .chip { padding: 2px 9px; border-radius: 6px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
+  .chip.ran { background: var(--info-bg); color: var(--info); border-color: transparent; font-weight: 600; }
+  .rows { margin: 0; padding: 0; list-style: none; }
+  .rows li { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 14px; }
+  .rows li:last-child { border-bottom: 0; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .log { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; max-height: 240px; overflow: auto; }
+  .log li { display: flex; gap: 10px; padding: 2px 0; }
+  .log time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Sabi Safe live case view</h1>
+    <span class="sub">Content-free: no transcripts, names or phone numbers. Calls are shown by a short reference.</span>
+    <span class="status"><span id="dot" class="dot"></span><span id="status">Not connected</span></span>
+  </header>
+
+  <form id="login" class="login" autocomplete="off" hidden>
+    <label for="token">Dashboard token</label>
+    <input id="token" type="password" required minlength="24" placeholder="DASHBOARD_TOKEN from the server's environment">
+    <button type="submit">Connect</button>
+    <div id="err" class="err" role="alert"></div>
+  </form>
+
+  <section id="view" hidden>
+    <div class="stats" id="stats"></div>
+    <div id="calls"></div>
+    <p class="foot">Updates every 2 seconds. Events are held in the server's memory and are not stored.</p>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var token = "";
+  try { token = sessionStorage.getItem("sabi_dashboard_token") || ""; } catch (e) {}
+  var timer = null;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  function words(value) { return String(value == null ? "" : value).replace(/_/g, " "); }
+  function pill(value, label) { return el("span", "pill " + String(value || "").replace(/[^a-z_]/g, ""), label || words(value)); }
+  function clock(seconds) { return new Date(seconds * 1000).toLocaleTimeString([], { hour12: false }); }
+  function age(from, to) {
+    var s = Math.max(0, Math.round(to - from));
+    return s < 90 ? s + "s" : Math.round(s / 60) + " min";
+  }
+
+  var RESPONDER = {
+    none: "No acknowledgement yet", check_in_sent: "No acknowledgement, check-in sent",
+    emergency_number_advised: "No acknowledgement, caller pointed to the emergency number",
+    unreachable: "Responder could not be reached", acknowledged: "Responder acknowledged"
+  };
+  var LADDER = [
+    ["send_text_message", "Text the responder"], ["start_phone_call", "Phone the responder"],
+    ["text_backup_responder", "Text the backup responder"], ["request_location", "Ask the caller for location"]
+  ];
+  var STEPS = [["triage", "Triage"], ["researcher", "Researcher"], ["advisor", "Advisor"]];
+
+  function section(title) { var box = el("div"); box.appendChild(el("h2", null, title)); return box; }
+
+  function renderCall(call, now) {
+    var card = el("article", "call" + (call.live && call.risk === "urgent" ? " urgent" : ""));
+    var head = el("div", "head");
+    head.appendChild(el("span", "ref", "Call " + call.ref));
+    head.appendChild(call.live ? pill("live", "Live") : pill("off", "Ended"));
+    head.appendChild(call.risk ? pill(call.risk, "Risk: " + call.risk) : pill("off", "Risk: not rated yet"));
+    head.appendChild(el("span", "sub", (call.live ? "running " : "lasted ") + age(call.started, call.ended || now)));
+    card.appendChild(head);
+
+    var grid = el("div", "grid");
+
+    var risk = section("Risk timeline");
+    var line = el("div", "timeline");
+    call.risk_timeline.forEach(function (c) {
+      var tick = el("span", "tick" + (c.risk ? " " + c.risk : ""));
+      tick.title = clock(c.ts) + ": " + (c.risk || "no result") + (c.ran.length ? " (ran " + c.ran.join(", ") + ")" : "");
+      line.appendChild(tick);
+    });
+    risk.appendChild(line);
+    risk.appendChild(el("div", "note", call.risk_timeline.length
+      ? call.risk_timeline.length + " analyses. Each block is one case-manager cycle."
+      : "Waiting for the first analysis."));
+    if (call.guidance.turns_behind != null) {
+      risk.appendChild(el("div", "note", "Voice agent's guidance is " + call.guidance.turns_behind + " turn(s) behind."));
+    }
+    grid.appendChild(risk);
+
+    var plan = section("Case plan: analysis");
+    var chips = el("div", "chips");
+    STEPS.forEach(function (s) { chips.appendChild(el("span", "chip" + (call.analysis.ran.indexOf(s[0]) >= 0 ? " ran" : ""), s[1])); });
+    plan.appendChild(chips);
+    var checked = el("div", "note");
+    checked.appendChild(document.createTextNode(call.analysis.cycles ? "Last cycle ran " + (call.analysis.ran.join(", ") || "nothing") + ". Safety rubric: " : "No cycle yet."));
+    if (call.analysis.cycles && call.analysis.rubric) checked.appendChild(pill(call.analysis.rubric));
+    if (call.analysis.checks > 1) checked.appendChild(document.createTextNode(" after " + call.analysis.checks + " checks"));
+    plan.appendChild(checked);
+    grid.appendChild(plan);
+
+    var esc = section("Case plan: emergency actions");
+    var list = el("ul", "rows");
+    LADDER.forEach(function (step) {
+      var status = call.escalation[step[0]];
+      var item = el("li");
+      item.appendChild(el("span", null, step[1]));
+      item.appendChild(status ? pill(status) : pill("off", "not started"));
+      list.appendChild(item);
+    });
+    esc.appendChild(list);
+    esc.appendChild(el("div", "note", "Submitted means a provider accepted it, not that it was delivered."));
+    grid.appendChild(esc);
+
+    var consent = section("Consent to contact the responder");
+    consent.appendChild(pill(call.consent.state === "not_asked" ? "off" : call.consent.state,
+      { not_asked: "Not asked yet", granted: "Granted", withdrawn: "Withdrawn" }[call.consent.state]));
+    grid.appendChild(consent);
+
+    var responder = section("Responder acknowledgement");
+    responder.appendChild(pill(call.responder.state === "none" ? "off" : call.responder.state, RESPONDER[call.responder.state]));
+    if (call.responder.location_received) responder.appendChild(el("div", "note", "The caller replied with a location."));
+    grid.appendChild(responder);
+
+    card.appendChild(grid);
+
+    var more = el("details");
+    more.appendChild(el("summary", null, "Activity (" + call.log.length + ")"));
+    var log = el("ul", "log");
+    call.log.forEach(function (e) {
+      var row = el("li");
+      row.appendChild(el("time", null, clock(e.ts)));
+      row.appendChild(el("span", null, e.label + (e.detail ? ": " + words(e.detail) : "")));
+      log.appendChild(row);
+    });
+    more.appendChild(log);
+    card.appendChild(more);
+    return card;
+  }
+
+  function render(data) {
+    var stats = $("stats");
+    stats.textContent = "";
+    [["Live calls", data.summary.live], ["Urgent now", data.summary.urgent],
+     ["Actions submitted", data.summary.submitted], ["Responder acknowledged", data.summary.acknowledged]]
+      .forEach(function (pair) {
+        var box = el("div", "stat");
+        box.appendChild(el("b", null, pair[1]));
+        box.appendChild(el("span", null, pair[0]));
+        stats.appendChild(box);
+      });
+    var calls = $("calls");
+    calls.textContent = "";
+    if (!data.calls.length) { calls.appendChild(el("p", "empty", "No calls yet since the server started.")); return; }
+    data.calls.forEach(function (call) { calls.appendChild(renderCall(call, data.server_time)); });
+  }
+
+  function setStatus(ok, text) {
+    $("dot").className = "dot " + (ok ? "ok" : "bad");
+    $("status").textContent = text;
+  }
+
+  function showLogin(message) {
+    clearInterval(timer);
+    $("view").hidden = true;
+    $("login").hidden = false;
+    $("err").textContent = message || "";
+    setStatus(false, "Not connected");
+  }
+
+  function poll() {
+    fetch("/dashboard/snapshot", { headers: { Authorization: "Bearer " + token }, cache: "no-store" })
+      .then(function (response) {
+        if (response.status === 401) { token = ""; try { sessionStorage.removeItem("sabi_dashboard_token"); } catch (e) {} showLogin("That token was not accepted."); return null; }
+        if (!response.ok) throw new Error("status " + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data) return;
+        $("login").hidden = true;
+        $("view").hidden = false;
+        render(data);
+        setStatus(true, "Updated " + clock(Date.now() / 1000));
+      })
+      .catch(function () { setStatus(false, "Connection lost, retrying"); });
+  }
+
+  function start() {
+    clearInterval(timer);
+    poll();
+    timer = setInterval(poll, 2000);
+  }
+
+  $("login").addEventListener("submit", function (event) {
+    event.preventDefault();
+    token = $("token").value.trim();
+    $("token").value = "";
+    try { sessionStorage.setItem("sabi_dashboard_token", token); } catch (e) {}
+    start();
+  });
+
+  if (token) start(); else showLogin("");
+})();
+</script>
+</body>
+</html>

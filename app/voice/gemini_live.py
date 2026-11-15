@@ -190,6 +190,11 @@ class GeminiLiveSession:
                 await self._answer_tools(msg["toolCall"])
 
             content = msg.get("serverContent") or {}
+            if os.getenv("DEBUG_LOG_LIVE_EVENTS"):
+                flags = sorted(k for k in content if k not in ("modelTurn", "inputTranscription", "outputTranscription"))
+                if flags or content.get("inputTranscription") or content.get("outputTranscription"):
+                    logger.info("LIVE_EVT flags=%s in=%s out=%s", flags, bool(content.get("inputTranscription")),
+                                bool(content.get("outputTranscription")))
             if content.get("interrupted"):
                 await self.on_interrupted()
 
@@ -205,10 +210,13 @@ class GeminiLiveSession:
                 if data:
                     await self.on_audio(base64.b64decode(data))
 
-            if content.get("turnComplete"):
+            # gemini-3.1 live sends `generationComplete` when the model finishes speaking but holds
+            # `turnComplete` until the caller's next activity, so flush the turn on either signal.
+            if content.get("generationComplete") or content.get("turnComplete"):
                 caller, model = self._caller_text.strip(), self._model_text.strip()
                 self._caller_text, self._model_text = "", ""
-                await self.on_turn_complete(caller, model)
+                if caller or model:
+                    await self.on_turn_complete(caller, model)
 
             if msg.get("goAway"):
                 logger.warning("Gemini Live goAway: %s", msg["goAway"])
