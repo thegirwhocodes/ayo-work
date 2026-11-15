@@ -34,7 +34,7 @@ from app.voice.audio import (
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
 from app.voice.openai_realtime import OpenAIRealtimeSession
-from harness.agent import create_harness, load_skill_files
+from harness.agent import create_harness
 from harness import emergency_plan
 from harness.emergency_jobs import cancel_job, cancel_session_jobs, create_job, get_job_result, job_progress, token_hash
 from harness.call_audio import SpeechCollector
