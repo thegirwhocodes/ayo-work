@@ -137,7 +137,7 @@ def test_voice_check_uses_no_llm(monkeypatch):
 
 
 def test_verifier_failure_never_ends_the_call(monkeypatch):
-    """verify_call turns any failure of the check into 'unsure'; the call carries on."""
+    """A failed background check becomes 'unsure'; the call carries on."""
     from app.voice import twilio_stream
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "secret")
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
@@ -154,7 +154,6 @@ def test_verifier_failure_never_ends_the_call(monkeypatch):
     monkeypatch.setattr(twilio_stream, "SpeakerVerifier", Verifier)
     events = iter([
         {"event": "start", "start": {"streamSid": "s", "customParameters": {"caller_token": sign_caller("+1234567890", "secret"), "sabi_country": "US"}}},
-        {"event": "media", "media": {"payload": base64.b64encode(b"audio").decode()}},
     ])
 
     class WebSocket:
@@ -162,9 +161,34 @@ def test_verifier_failure_never_ends_the_call(monkeypatch):
             return json.dumps(next(events))
 
     bridge = TwilioMediaBridge(WebSocket(), "prompt")
-    asyncio.run(bridge.verify_call())  # does not raise
+
+    async def call():
+        await bridge._await_start()
+        bridge._collect_for_verification(b"\x00" * 320)  # enough speech: the check starts in the background
+        await bridge._verify_task  # does not raise
+
+    asyncio.run(call())
     assert bridge.emergency_context.caller_number == "+1234567890" and bridge.location.country == "US"
     assert bridge.identity_state == "unsure" and bridge.verification_status is None
+
+
+def test_a_matched_voice_loads_memory_in_the_background(monkeypatch):
+    from app.voice import twilio_stream
+    bridge, _ = _check_voice(monkeypatch, "matched")
+    loaded = []
+
+    async def load():
+        loaded.append(True)
+
+    monkeypatch.setattr(bridge, "_load_memory", load)
+    bridge.emergency_context.caller_number = "+1234567890"
+
+    async def go():
+        await bridge._verify_in_background(type("C", (), {"audio_16khz": lambda self: b"sample"})())
+
+    asyncio.run(go())
+    assert loaded == [True] and bridge.identity_state == "known"
+
 
 def test_ensure_speaker_model_skips_download_when_files_present(tmp_path, monkeypatch):
     from harness.tools import verify_voice

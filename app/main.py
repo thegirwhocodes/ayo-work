@@ -77,14 +77,21 @@ def load_system_prompt() -> str:
     return "You are Ayo, a calm, warm listening friend on a free phone line for children."
 
 
+DEFAULT_GREETING_AUDIO = "config/greeting_new_caller.ulaw"
+
+
 def load_greeting_audio() -> bytes:
-    """Ayo's pre-recorded greeting (raw 8 kHz mu-law), played the moment the call connects."""
-    path = os.getenv("AYO_GREETING_AUDIO", "")
-    if not path:
+    """Ayo's pre-recorded greeting (raw 8 kHz mu-law), played the moment the call connects.
+
+    The bundled greeting is the default, so the agent always speaks first. AYO_GREETING_AUDIO points at another
+    file; "off" removes the recording (the voice engine then speaks its own opening line).
+    """
+    path = os.getenv("AYO_GREETING_AUDIO", "") or DEFAULT_GREETING_AUDIO
+    if path.strip().lower() == "off":
         return b""
     resolved = _resolve(path)
     if not resolved.is_file():
-        logger.warning("AYO_GREETING_AUDIO is set but the file is missing; using the spoken prompt")
+        logger.warning("The greeting file %s is missing; the voice engine will speak its own opening line", path)
         return b""
     return resolved.read_bytes()
 
@@ -298,12 +305,11 @@ async def voice_incoming(request: Request):
         for name, value in sorted(location.to_custom_parameters().items())
     )
 
-    # With Ayo's recorded greeting configured, the bridge plays it in Bukola's voice as soon as
-    # the stream starts, so Twilio's robotic <Say> is left out.
-    say = "" if GREETING_AUDIO else (
-        "\n    <Say>We use your voice to recognize you on future calls. Please speak for a few seconds.</Say>")
+    # No <Say>: the agent speaks first through the media stream (the recorded greeting, or the voice engine's own
+    # opening line), and the voice check is collected quietly from the conversation. The caller is never asked
+    # to say something for it.
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>{say}
+<Response>
     <Connect>
         <Stream url="{protocol}://{host}/ws/twilio">{parameter}{stream_params}
         </Stream>

@@ -56,14 +56,20 @@ from settings import get_settings
 
 logger = logging.getLogger("ayo.voice.twilio")
 
+VOICE_RECOGNITION_NOTE = (
+    "\nThis line quietly recognizes returning callers by their voice, in the background, from what they say as you talk. "
+    "You run no check: never ask the caller to say, repeat or read anything for it, and never tell them how it turned out. "
+    "Once, at a calm moment after the child has spoken a few times and is not in distress, say in one short plain sentence that "
+    "you can recognize their voice next time so they will not have to start over. Do not bring it up again unless they ask.")
 CONSENT_QUESTION = "may i contact the emergency responder with what you shared"
 RUNTIME_CONTEXT_PLACEHOLDER = "{RUNTIME_CONTEXT}"
-FIRST_WORDS_MAX_BYTES = 30 * 8000 * 2  # keep at most the last 30 s of caller audio for replay
 GREETING_MESSAGE_BYTES = 1600          # 200 ms of 8 kHz mu-law per Twilio media message
-VERIFICATION_TIMEOUT_S = 12.0          # how long to wait for enough speech before carrying on as "unsure"
+START_TIMEOUT_S = 15.0                 # how long to wait for Twilio's `start` event before giving up on the call
 
-# Voice identity states. A failed or impossible voice check never ends the call (a child who whispers,
-# cries, is silent, shares a phone, or calls while the database is down must still reach Ayo).
+# Voice identity states. The voice check runs quietly in the background on whatever the caller says during the
+# conversation: nothing waits for it and the caller is never asked to say anything for it. A failed or impossible
+# check never ends the call (a child who whispers, cries, is silent, shares a phone, or calls while the database
+# is down must still reach Ayo). Until the check finishes the state is "unsure".
 IDENTITY_KNOWN = "known"      # voice matches the enrolled voice for this caller
 IDENTITY_NEW = "new"          # first call: this voice was just enrolled
 IDENTITY_UNKNOWN = "unknown"  # a different voice from the enrolled one
@@ -118,9 +124,10 @@ class TwilioMediaBridge:
         # Ayo's pre-recorded greeting (raw 8 kHz mu-law), played as soon as the stream starts.
         self.greeting_audio = greeting_audio
         self._greeting_task: Optional[asyncio.Task] = None
-        # What the caller says while their voice is being checked (before any AI is connected)
-        # is kept and replayed to the voice engine, so Ayo answers the child's first words.
-        self._first_words = bytearray()
+        # Caller speech is also fed to this collector as the conversation goes on; once it holds enough voiced audio
+        # the check runs in a background task. The voice engine never waits for it.
+        self._voice_collector: Optional[SpeechCollector] = None
+        self._verify_task: Optional[asyncio.Task] = None
 
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
@@ -186,6 +193,7 @@ class TwilioMediaBridge:
                         "anything unless the caller has just answered that question, and never claim memory was saved unless confirmed.")
             if self.memory:
                 support += "\nPreviously agreed communication preferences: " + json.dumps(self.memory)
+        support += VOICE_RECOGNITION_NOTE
         base, briefing = self.system_prompt, build_location_briefing(self.location)
         if RUNTIME_CONTEXT_PLACEHOLDER in base:  # Ayo's prompt has a slot for the caller context
             base, briefing = base.replace(RUNTIME_CONTEXT_PLACEHOLDER, briefing.strip()), ""
@@ -234,10 +242,8 @@ class TwilioMediaBridge:
         logger.info("Starting Twilio Media Bridge...")
 
         try:
-            await self.verify_call()
+            await self._await_start()
             await self._setup_support()
-            if self.verification_status == "matched":
-                await self._load_memory()  # a returning, voice-matched caller gets their consented preferences back
             self._ensure_harness_agent()
             if not await self._connect_gemini():
                 await self.ws.close()
@@ -268,7 +274,9 @@ class TwilioMediaBridge:
                         mulaw_bytes = base64.b64decode(media_payload)
                         # 2. Decode mu-law to 8kHz PCM16
                         pcm16_bytes = mulaw_to_pcm16(mulaw_bytes)
-                        # 3. Stream to the voice engine
+                        # 3. Quietly collect speech for the background voice check (never blocks the call)
+                        self._collect_for_verification(pcm16_bytes)
+                        # 4. Stream to the voice engine
                         await self.gemini_session.send_audio(pcm16_bytes)
 
                 elif event == "stop":
@@ -285,6 +293,9 @@ class TwilioMediaBridge:
         finally:
             self._running = False
             log_tool_event("call_ended")
+            if self._verify_task:
+                self._verify_task.cancel()
+                await asyncio.gather(self._verify_task, return_exceptions=True)
             for task in self.emergency_tasks:
                 task.cancel()
             if self.emergency_tasks:
@@ -303,26 +314,22 @@ class TwilioMediaBridge:
                 task.cancel()
             logger.info("Twilio Media Bridge closed.")
 
-    async def verify_call(self):
-        """Collect initial voiced audio, then enroll or verify the caller's voice.
+    async def _await_start(self):
+        """Read Twilio's events up to `start`, check the signed caller token and begin the greeting.
 
-        Sets `identity_state` (known / new / unknown / unsure) and never ends the call over the
-        result. Only a bad caller token or a hang-up before the stream starts is fatal.
+        Nothing else happens here: the voice engine connects straight afterwards and the voice check is
+        collected later from the conversation itself. Only a bad caller token or a hang-up before the
+        stream starts is fatal.
         """
-        collector = SpeechCollector()
-        caller_id = None
-        enough_speech = True
-        deadline = asyncio.get_running_loop().time() + VERIFICATION_TIMEOUT_S
+        deadline = asyncio.get_running_loop().time() + START_TIMEOUT_S
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                enough_speech = False
-                break
+                raise RuntimeError("no caller identity: the stream never started")
             try:
                 data = json.loads(await asyncio.wait_for(self.ws.receive_text(), timeout=remaining))
             except asyncio.TimeoutError:
-                enough_speech = False
-                break
+                raise RuntimeError("no caller identity: the stream never started")
             event = data.get("event")
             if event == "start":
                 start = data.get("start", {})
@@ -330,25 +337,38 @@ class TwilioMediaBridge:
                 token = start.get("customParameters", {}).get("caller_token", "")
                 caller_id = verify_caller(token, os.getenv("TWILIO_AUTH_TOKEN", ""))
                 self.emergency_context.caller_number = caller_id
+                self._voice_collector = SpeechCollector()
                 self._start_greeting()
-            elif event == "media" and caller_id:
-                payload = data.get("media", {}).get("payload", "")
-                pcm = mulaw_to_pcm16(base64.b64decode(payload, validate=True))
-                self._keep_first_words(pcm)
-                if collector.add(pcm):
-                    break
-            elif event == "stop":
-                raise RuntimeError("call ended before verification")
+                return
+            if event == "stop":
+                raise RuntimeError("call ended before the stream started")
 
-        if not caller_id:
-            raise RuntimeError("no caller identity: the stream never started")
-        if not enough_speech:
-            self._set_identity(IDENTITY_UNSURE, "not_enough_speech")
+    def _collect_for_verification(self, pcm: bytes) -> None:
+        """Feed caller speech to the voice check; when there is enough, run it in the background."""
+        collector = self._voice_collector
+        if collector is None:
             return
         try:
-            await self._check_voice(collector, caller_id)
-        except Exception as exc:  # database down, model failure, ...: carry on, never hang up
+            enough = collector.add(pcm)
+        except Exception as exc:  # never let the check disturb the call
+            logger.warning("Voice collection failed: %s", type(exc).__name__)
+            self._voice_collector = None
+            return
+        if enough:
+            self._voice_collector = None
+            self._verify_task = asyncio.create_task(self._verify_in_background(collector))
+
+    async def _verify_in_background(self, collector) -> None:
+        """Enroll or compare the voice while the conversation carries on. Never raises, never ends the call."""
+        try:
+            await self._check_voice(collector, self.emergency_context.caller_number)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # database down, model failure, ...: carry on as unsure
             self._set_identity(IDENTITY_UNSURE, f"check_failed:{type(exc).__name__}")
+            return
+        if self.verification_status == "matched":
+            await self._load_memory()  # a returning, voice-matched caller gets their consented preferences back
 
     def _set_identity(self, state: str, reason: str) -> None:
         self.identity_state, self.identity_reason = state, reason
@@ -385,26 +405,10 @@ class TwilioMediaBridge:
         except Exception as exc:  # a greeting failure must never end the call
             logger.warning("Greeting playback failed: %s", type(exc).__name__)
 
-    def _keep_first_words(self, pcm: bytes) -> None:
-        self._first_words.extend(pcm)
-        overflow = len(self._first_words) - FIRST_WORDS_MAX_BYTES
-        if overflow > 0:
-            del self._first_words[:overflow]
-
-    async def _replay_first_words(self) -> None:
-        """Give the voice engine what the caller said during the voice check, in 20 ms frames."""
-        audio, self._first_words = bytes(self._first_words), bytearray()
-        if not audio or self.gemini_session is None:
-            return
-        for i in range(0, len(audio), 320):
-            await self.gemini_session.send_audio(audio[i:i + 320])
-        logger.info("Replayed %.1f s of the caller's first words to the voice engine", len(audio) / 16000)
     async def _open_conversation(self):
-        """Give the voice engine what the caller already said; with nothing to answer and no recorded
-        greeting playing, prompt the opening line so the call never starts in silence."""
-        had_words = bool(self._first_words)
-        await self._replay_first_words()
-        if not had_words and not self.greeting_audio:
+        """The agent speaks first: Ayo's recorded greeting is already playing; without one, prompt the opening
+        line so the call never starts in silence."""
+        if not self.greeting_audio:
             await self._greet()
 
     async def _greet(self):
