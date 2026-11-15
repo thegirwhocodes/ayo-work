@@ -58,5 +58,8 @@ jobs:
             git fetch origin main
             git checkout main
             git pull --ff-only origin main
-            docker compose up -d --build --remove-orphans
-            docker compose ps
+            # Landing lives in ~/ayo-work; voice stack stays under /opt/sabi-safe.
+            # Only rebuild the public site here to avoid port clashes with the existing Compose project.
+            docker compose up -d --build web
+            docker compose ps web
+            curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/
